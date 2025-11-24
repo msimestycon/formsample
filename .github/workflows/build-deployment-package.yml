@@ -1,0 +1,820 @@
+name: Build Deployment Package (Offline)
+
+on:
+  push:
+    branches:
+      - main
+      - release/*
+    paths:
+      - '*/src/**'           # Cambios en source de cualquier form
+      - '*/package.json'     # Cambios en package.json de forms
+      - 'build-form.js'      # Cambios en script de build compartido
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version (e.g., 1.0.0)'
+        required: true
+        default: '1.0.0'
+      release_notes:
+        description: 'Release notes (optional, will use commit message if empty)'
+        required: false
+        type: string
+
+jobs:
+  build-deployment-package:
+    name: Build Offline Deployment Package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # Necesario para hacer push al repositorio
+    outputs:
+      changed_forms_json: ${{ steps.changed_forms.outputs.changed_forms_json }}
+      has_changes: ${{ steps.changed_forms.outputs.no_changes != 'true' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Para obtener commit hash
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Get build metadata (commit hash and date)
+        id: build_metadata
+        run: |
+          COMMIT_HASH="${{ github.sha }}"
+          SHORT_HASH="${COMMIT_HASH:0:7}"
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+          echo "commit_hash=$COMMIT_HASH" >> $GITHUB_OUTPUT
+          echo "short_hash=$SHORT_HASH" >> $GITHUB_OUTPUT
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+
+          echo "🔖 Commit: $SHORT_HASH"
+          echo "📅 Build Date: $BUILD_DATE"
+
+      - name: Detect changed forms
+        id: changed_forms
+        run: |
+          echo "🔍 Detecting changed forms..."
+
+          # Detección inteligente de cambios
+          # Si es workflow_dispatch, construir todos los forms
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "📦 Manual trigger detected - building all forms"
+            CHANGED_FORMS=$(find . -type f -name "package.json" -not -path "*/node_modules/*" -not -path "./package.json" | xargs dirname | xargs -n1 basename)
+          else
+            # Para push events, detectar solo los forms que realmente cambiaron
+            echo "🔍 Analyzing changes from the push event..."
+
+            # Usar el rango de commits del push event
+            if [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+              # Push normal con historial
+              BEFORE_SHA="${{ github.event.before }}"
+              AFTER_SHA="${{ github.event.after }}"
+              echo "  Comparing: ${BEFORE_SHA:0:7}...${AFTER_SHA:0:7}"
+
+              # Detectar archivos cambiados en el rango del push
+              CHANGED_FILES=$(git diff --name-only "$BEFORE_SHA" "$AFTER_SHA" 2>/dev/null || git diff --name-only HEAD~1 HEAD)
+            else
+              # Primer push o branch nuevo
+              echo "  First push detected, checking last commit"
+              CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git ls-tree --name-only -r HEAD)
+            fi
+
+            # Filtrar solo cambios en forms (src/ o package.json de cada form)
+            CHANGED_FORMS=$(echo "$CHANGED_FILES" | grep -E '^[^/]+/(src/|package\.json)' | cut -d'/' -f1 | sort -u || true)
+
+            if [ -z "$CHANGED_FORMS" ]; then
+              echo "⚠️  No form changes detected in this push"
+              echo "  Changed files:"
+              echo "$CHANGED_FILES" | head -20
+              echo ""
+              echo "  ℹ️ No forms need to be rebuilt"
+              # Establecer un valor especial para indicar que no hay cambios
+              CHANGED_FORMS="NONE"
+            fi
+          fi
+
+          # Guardar resultado
+          if [ "$CHANGED_FORMS" = "NONE" ]; then
+            echo "no_changes=true" >> $GITHUB_OUTPUT
+            echo "changed_forms=" >> $GITHUB_OUTPUT
+            echo "changed_forms_json=[]" >> $GITHUB_OUTPUT
+            echo "🔴 No forms to build - workflow will skip build steps"
+          else
+            echo "no_changes=false" >> $GITHUB_OUTPUT
+            # Convertir a array para GitHub Output
+            FORMS_ARRAY=$(echo "$CHANGED_FORMS" | tr '\n' ' ')
+            echo "changed_forms=$FORMS_ARRAY" >> $GITHUB_OUTPUT
+
+            # Convertir a JSON array para matrix strategy
+            FORMS_JSON=$(echo "$CHANGED_FORMS" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+            echo "changed_forms_json=$FORMS_JSON" >> $GITHUB_OUTPUT
+
+            echo "📝 Forms to build:"
+            echo "$CHANGED_FORMS"
+            echo ""
+            echo "📋 JSON array: $FORMS_JSON"
+          fi
+
+      - name: Calculate per-form versions (simple increment)
+        id: form_versions
+        if: steps.changed_forms.outputs.no_changes != 'true'
+        run: |
+          echo "🔢 Incrementing versions for each changed form..."
+          echo ""
+
+          CHANGED_FORMS="${{ steps.changed_forms.outputs.changed_forms }}"
+
+          # Procesar cada form individualmente
+          for form_name in $CHANGED_FORMS; do
+            echo "════════════════════════════════════════════════════════════════"
+            echo "📦 Processing: $form_name"
+            echo "────────────────────────────────────────────────────────────────"
+
+            # 1. Leer package.json ACTUAL (en este commit)
+            if [ ! -f "$form_name/package.json" ]; then
+              echo "❌ ERROR: package.json not found for $form_name"
+              exit 1
+            fi
+
+            CURRENT_VERSION=$(jq -r '.version // "1.0.0"' "$form_name/package.json")
+            echo "📄 Current version in package.json: $CURRENT_VERSION"
+
+            # 2. Leer package.json del commit ANTERIOR
+            PREVIOUS_VERSION=$(git show HEAD~1:"$form_name/package.json" 2>/dev/null | jq -r '.version // "0.0.0"' 2>/dev/null || echo "0.0.0")
+            echo "📜 Previous version (last commit): $PREVIOUS_VERSION"
+
+            # 3. Incrementar PATCH automáticamente
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$PREVIOUS_VERSION"
+
+            # Si es primera vez (0.0.0), empezar en 1.0.0
+            if [ "$PREVIOUS_VERSION" = "0.0.0" ]; then
+              NEW_VERSION="1.0.0"
+              echo "🎉 First deployment! Starting at v1.0.0"
+            else
+              # Incrementar PATCH
+              PATCH=$((PATCH + 1))
+              NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+              echo "🔼 Auto-increment: $PREVIOUS_VERSION → $NEW_VERSION"
+            fi
+
+            echo ""
+
+            # 4. Actualizar package.json con nueva versión
+            echo "💾 Updating $form_name/package.json to version $NEW_VERSION..."
+            jq --arg version "$NEW_VERSION" '.version = $version' "$form_name/package.json" > "$form_name/package.tmp.json"
+            mv "$form_name/package.tmp.json" "$form_name/package.json"
+
+            echo "✅ package.json updated: $PREVIOUS_VERSION → $NEW_VERSION"
+            echo ""
+
+            # 5. Guardar versión en output
+            echo "${form_name}_version=$NEW_VERSION" >> /tmp/form_versions.txt
+
+            echo "════════════════════════════════════════════════════════════════"
+            echo ""
+          done
+
+          echo "✅ All form versions incremented automatically"
+          echo ""
+          echo "📋 Summary of versions:"
+          cat /tmp/form_versions.txt
+
+          # Guardar en GITHUB_OUTPUT
+          cat /tmp/form_versions.txt >> $GITHUB_OUTPUT
+
+      - name: Build changed forms
+        if: steps.changed_forms.outputs.no_changes != 'true'
+        run: |
+          echo "🔨 Building forms..."
+
+          FORMS_TO_BUILD="${{ steps.changed_forms.outputs.changed_forms }}"
+
+          for form_name in $FORMS_TO_BUILD; do
+            if [ -d "$form_name" ] && [ -f "$form_name/package.json" ]; then
+              echo "  📝 Building: $form_name"
+              cd "$form_name"
+
+              # Verificar que existe el script de build
+              if npm run | grep -q "build"; then
+                npm run build
+
+                if [ -f "dist/form.js" ]; then
+                  echo "  ✅ Built successfully: $form_name ($(wc -c < dist/form.js) bytes)"
+                else
+                  echo "  ❌ Build failed: $form_name (no dist/form.js)"
+                  exit 1
+                fi
+              else
+                echo "  ⚠️  No build script found for: $form_name"
+              fi
+
+              cd ..
+            fi
+          done
+
+      - name: Extract release notes
+        id: release_notes
+        run: |
+          echo "📝 Extracting release notes..."
+
+          # Prioridad 1: Input manual (workflow_dispatch)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.release_notes }}" ]; then
+            RELEASE_NOTES="${{ github.event.inputs.release_notes }}"
+            echo "ℹ️  Using manual release notes from workflow input"
+          else
+            # Prioridad 2: Mensaje del commit
+            COMMIT_MESSAGE=$(git log -1 --pretty=format:"%B")
+
+            # Si el mensaje del commit tiene formato especial (conventional commits), extraerlo
+            # Formato esperado: "feat: descripción\n\n- cambio 1\n- cambio 2"
+            if echo "$COMMIT_MESSAGE" | grep -q "^feat:\|^fix:\|^chore:\|^docs:\|^refactor:\|^perf:\|^test:"; then
+              # Extraer todo después del título (primera línea)
+              RELEASE_NOTES=$(echo "$COMMIT_MESSAGE" | tail -n +2 | sed '/^$/d')
+
+              if [ -z "$RELEASE_NOTES" ]; then
+                # Si no hay cuerpo, usar solo el título
+                RELEASE_NOTES=$(echo "$COMMIT_MESSAGE" | head -n 1)
+              fi
+            else
+              # Usar el mensaje del commit completo
+              RELEASE_NOTES="$COMMIT_MESSAGE"
+            fi
+
+            # Si está vacío, usar mensaje por defecto
+            if [ -z "$RELEASE_NOTES" ]; then
+              RELEASE_NOTES="Version ${{ steps.version.outputs.version }} - Build automático"
+            fi
+          fi
+
+          # Guardar en archivo temporal
+          echo "$RELEASE_NOTES" > /tmp/release_notes.txt
+
+          echo "✅ Release notes extracted:"
+          echo "$RELEASE_NOTES"
+
+      - name: Generate manifest.json
+        id: manifest
+        if: steps.changed_forms.outputs.no_changes != 'true'
+        run: |
+          echo "📋 Generating manifest.json..."
+
+          # Crear manifest.json dinámicamente con info extendida
+          # packageVersion será la fecha actual en formato semver-like para el paquete completo
+          PACKAGE_VERSION="1.0.$(date +%Y%m%d%H%M)"
+
+          cat > manifest.json << EOF
+          {
+            "packageVersion": "$PACKAGE_VERSION",
+            "buildDate": "${{ steps.build_metadata.outputs.build_date }}",
+            "commitHash": "${{ steps.build_metadata.outputs.commit_hash }}",
+            "commitShortHash": "${{ steps.build_metadata.outputs.short_hash }}",
+            "repositoryUrl": "${{ github.server_url }}/${{ github.repository }}",
+            "commitUrl": "${{ github.server_url }}/${{ github.repository }}/commit/${{ steps.build_metadata.outputs.commit_hash }}",
+            "workflowRunUrl": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "forms": [
+          EOF
+
+          # Leer release notes del archivo temporal
+          RELEASE_NOTES=$(cat /tmp/release_notes.txt)
+
+          # Agregar SOLO los forms compilados al manifest
+          FORMS_TO_MANIFEST="${{ steps.changed_forms.outputs.changed_forms }}"
+          first=true
+
+          for form_name in $FORMS_TO_MANIFEST; do
+            # Verificar que exista el form compilado
+            if [ -d "$form_name" ] && [ -f "$form_name/package.json" ] && [ -f "$form_name/dist/form.js" ]; then
+              version=$(jq -r '.version // "1.0.0"' "$form_name/package.json")
+              description=$(jq -r '.description // "Custom form"' "$form_name/package.json")
+              author=$(jq -r '.author // "Bizuit Team"' "$form_name/package.json")
+
+              # ProcessName = FormName con capitalización (AprobacionGastos)
+              process_name=$(echo "$form_name" | sed -r 's/(^|-)([a-z])/\U\2/g')
+
+              size=$(wc -c < "$form_name/dist/form.js")
+
+              # Escapar release notes para JSON (convertir a JSON string)
+              release_notes_json=$(echo "$RELEASE_NOTES" | jq -Rs .)
+
+              # Agregar coma si no es el primero
+              if [ "$first" = false ]; then
+                echo "," >> manifest.json
+              fi
+              first=false
+
+              # Agregar form al manifest con releaseNotes y git tag
+              cat >> manifest.json << FORM_EOF
+              {
+                "formName": "$form_name",
+                "processName": "$process_name",
+                "version": "$version",
+                "gitTag": "${form_name}-v${version}",
+                "author": "$author",
+                "description": "$description",
+                "sizeBytes": $size,
+                "path": "forms/$form_name/form.js",
+                "releaseNotes": $release_notes_json
+              }
+          FORM_EOF
+            fi
+          done
+
+          # Cerrar manifest.json
+          cat >> manifest.json << EOF
+            ]
+          }
+          EOF
+
+          # Pretty print
+          jq '.' manifest.json > manifest.tmp && mv manifest.tmp manifest.json
+
+          echo "✅ Manifest generated:"
+          cat manifest.json
+
+          # Contar forms
+          form_count=$(jq '.forms | length' manifest.json)
+          echo "form_count=$form_count" >> $GITHUB_OUTPUT
+
+      - name: Create deployment package structure
+        if: steps.changed_forms.outputs.no_changes != 'true'
+        run: |
+          echo "📦 Creating deployment package structure..."
+
+          mkdir -p deployment-package/forms
+
+          # Copiar manifest.json
+          cp manifest.json deployment-package/
+
+          # Crear VERSION.txt con información completa
+          cat > deployment-package/VERSION.txt << EOF
+          ═══════════════════════════════════════════════════════════════
+          BIZUIT CUSTOM FORMS DEPLOYMENT PACKAGE
+          ═══════════════════════════════════════════════════════════════
+
+          Build Date:          ${{ steps.build_metadata.outputs.build_date }}
+
+          Git Commit:          ${{ steps.build_metadata.outputs.commit_hash }}
+          Short Hash:          ${{ steps.build_metadata.outputs.short_hash }}
+
+          Repository:          ${{ github.repository }}
+          Branch:              ${{ github.ref_name }}
+          Workflow Run:        #${{ github.run_number }}
+
+          ───────────────────────────────────────────────────────────────
+          LINKS
+          ───────────────────────────────────────────────────────────────
+
+          View Commit:         ${{ github.server_url }}/${{ github.repository }}/commit/${{ steps.build_metadata.outputs.commit_hash }}
+          View Workflow:       ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          ───────────────────────────────────────────────────────────────
+          FORMS IN THIS PACKAGE (INDEPENDENT VERSIONS)
+          ───────────────────────────────────────────────────────────────
+
+          EOF
+
+          # Listar forms en VERSION.txt con sus versiones individuales y git tags
+          jq -r '.forms[] | "  • \(.formName) (\(.processName)) - v\(.version)\n    Git Tag: \(.gitTag)"' manifest.json >> deployment-package/VERSION.txt
+
+          echo "" >> deployment-package/VERSION.txt
+          echo "ℹ️  NOTE: Each form has independent versioning." >> deployment-package/VERSION.txt
+          echo "   Git tags format: {form-name}-v{version}" >> deployment-package/VERSION.txt
+          echo "" >> deployment-package/VERSION.txt
+          echo "═══════════════════════════════════════════════════════════════" >> deployment-package/VERSION.txt
+
+          # Copiar SOLO los forms que fueron compilados
+          FORMS_TO_PACKAGE="${{ steps.changed_forms.outputs.changed_forms }}"
+
+          for form_name in $FORMS_TO_PACKAGE; do
+            if [ -d "$form_name" ] && [ -f "$form_name/dist/form.js" ]; then
+              mkdir -p "deployment-package/forms/$form_name"
+              cp "$form_name/dist/form.js" "deployment-package/forms/$form_name/"
+              echo "  ✅ Copied: $form_name"
+            fi
+          done
+
+          echo "📂 Package structure:"
+          tree deployment-package || find deployment-package -type f
+
+      - name: Verify deployment package structure
+        if: steps.changed_forms.outputs.no_changes != 'true'
+        run: |
+          echo "📋 Package structure:"
+          tree deployment-package || find deployment-package -type f
+
+          echo ""
+          echo "📊 Package stats:"
+          du -sh deployment-package
+          echo "Forms: ${{ steps.manifest.outputs.form_count }}"
+
+      - name: Create deployment ZIPs (one per form with independent versions)
+        if: steps.changed_forms.outputs.no_changes != 'true'
+        run: |
+          echo "📦 Creating individual deployment ZIPs for each form..."
+
+          FORMS_TO_PACKAGE="${{ steps.changed_forms.outputs.changed_forms }}"
+
+          for form_name in $FORMS_TO_PACKAGE; do
+            if [ -d "$form_name" ] && [ -f "$form_name/dist/form.js" ]; then
+              echo ""
+              echo "📝 Creating ZIP for: $form_name"
+
+              # Leer versión de package.json (ya actualizado en step anterior)
+              FORM_VERSION=$(jq -r '.version' "$form_name/package.json")
+              echo "  Version: $FORM_VERSION"
+
+              # Crear estructura temporal para este form
+              mkdir -p "temp-package-$form_name"
+
+              # Crear un manifest.json INDIVIDUAL para este form específico
+              # Primero, extraer la info de este form del manifest general
+              PACKAGE_VERSION="1.0.$(date +%Y%m%d%H%M)"
+
+              # Obtener información del form
+              description=$(jq -r '.description // "Custom form"' "$form_name/package.json")
+              author=$(jq -r '.author // "Bizuit Team"' "$form_name/package.json")
+              process_name=$(echo "$form_name" | sed -r 's/(^|-)([a-z])/\U\2/g')
+              size=$(wc -c < "$form_name/dist/form.js")
+
+              # Leer release notes
+              RELEASE_NOTES=$(cat /tmp/release_notes.txt 2>/dev/null || echo "Deployment package")
+              release_notes_json=$(echo "$RELEASE_NOTES" | jq -Rs .)
+
+              # Crear manifest individual con SOLO este form usando jq
+              jq -n \
+                --arg packageVersion "$PACKAGE_VERSION" \
+                --arg buildDate "${{ steps.build_metadata.outputs.build_date }}" \
+                --arg commitHash "${{ steps.build_metadata.outputs.commit_hash }}" \
+                --arg commitShortHash "${{ steps.build_metadata.outputs.short_hash }}" \
+                --arg repositoryUrl "${{ github.server_url }}/${{ github.repository }}" \
+                --arg commitUrl "${{ github.server_url }}/${{ github.repository }}/commit/${{ steps.build_metadata.outputs.commit_hash }}" \
+                --arg workflowRunUrl "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+                --arg formName "$form_name" \
+                --arg processName "$process_name" \
+                --arg version "$FORM_VERSION" \
+                --arg gitTag "${form_name}-v${FORM_VERSION}" \
+                --arg description "$description" \
+                --arg author "$author" \
+                --argjson releaseNotes "$release_notes_json" \
+                --arg sizeBytes "$size" \
+                --arg path "forms/$form_name/form.js" \
+                '{
+                  packageVersion: $packageVersion,
+                  buildDate: $buildDate,
+                  commitHash: $commitHash,
+                  commitShortHash: $commitShortHash,
+                  repositoryUrl: $repositoryUrl,
+                  commitUrl: $commitUrl,
+                  workflowRunUrl: $workflowRunUrl,
+                  forms: [
+                    {
+                      formName: $formName,
+                      processName: $processName,
+                      version: $version,
+                      gitTag: $gitTag,
+                      description: $description,
+                      author: $author,
+                      releaseNotes: $releaseNotes,
+                      sizeBytes: ($sizeBytes | tonumber),
+                      path: $path
+                    }
+                  ]
+                }' > "temp-package-$form_name/manifest.json"
+
+              # Copiar VERSION.txt
+              cp deployment-package/VERSION.txt "temp-package-$form_name/"
+
+              # Copiar solo este form
+              mkdir -p "temp-package-$form_name/forms/$form_name"
+              cp "$form_name/dist/form.js" "temp-package-$form_name/forms/$form_name/"
+
+              # Nombre del ZIP específico para este form CON SU VERSIÓN INDIVIDUAL
+              PACKAGE_NAME="${form_name}-deployment-${FORM_VERSION}-${{ steps.build_metadata.outputs.short_hash }}.zip"
+
+              # Crear ZIP
+              cd "temp-package-$form_name"
+              zip -r "../$PACKAGE_NAME" .
+              cd ..
+
+              # Copiar a directorio upload/ del form
+              mkdir -p "$form_name/upload"
+              cp "$PACKAGE_NAME" "$form_name/upload/"
+
+              # Limpiar directorio temporal
+              rm -rf "temp-package-$form_name"
+
+              echo "  ✅ Created: $PACKAGE_NAME ($(wc -c < "$PACKAGE_NAME") bytes)"
+              echo "  📁 Copied to: $form_name/upload/"
+            fi
+          done
+
+          echo ""
+          echo "📊 Deployment ZIPs created:"
+          ls -lh *-deployment-*.zip 2>/dev/null || echo "  (check individual form upload/ directories)"
+
+          echo ""
+          echo "🔗 Traceability:"
+          echo "  - Each ZIP is named: {form-name}-deployment-{form-version}-{hash}.zip"
+          echo "  - ZIP filename includes INDEPENDENT version per form + commit hash"
+          echo "  - VERSION.txt inside ZIP has full git information"
+          echo "  - manifest.json has per-form git tags and commit URLs"
+
+      # Upload each form's ZIP as an individual artifact with dynamic name
+      # Since GitHub Actions doesn't support dynamic matrices, we need to generate the artifact names
+      - name: Generate artifact upload information
+        id: artifact_info
+        run: |
+          echo "📦 Generating artifact information..."
+
+          # Initialize JSON for artifact info
+          echo '{}' > artifact_info.json
+
+          CHANGED_FORMS="${{ steps.changed_forms.outputs.changed_forms }}"
+
+          for form_name in $CHANGED_FORMS; do
+            if [ -d "$form_name/upload" ] && ls "$form_name/upload/"*.zip 1> /dev/null 2>&1; then
+              # Get the NEWEST ZIP filename (the one we just created)
+              ZIP_FILE=$(ls -t "$form_name/upload/"*.zip | head -1)
+              ZIP_BASENAME=$(basename "$ZIP_FILE" .zip)
+
+              # Extract version and hash from the ZIP filename
+              # Pattern: {form-name}-deployment-{version}-{hash}.zip
+              FORM_VERSION=$(jq -r '.version' "$form_name/package.json")
+              SHORT_HASH="${{ steps.build_metadata.outputs.short_hash }}"
+
+              # Store the artifact name for this form
+              echo "${form_name}_artifact_name=${ZIP_BASENAME}" >> $GITHUB_OUTPUT
+
+              # Add to JSON for reference
+              jq --arg form "$form_name" \
+                 --arg name "$ZIP_BASENAME" \
+                 --arg path "$ZIP_FILE" \
+                 '. + {($form): {"name": $name, "path": $path}}' \
+                 artifact_info.json > artifact_info.tmp && mv artifact_info.tmp artifact_info.json
+
+              echo "  ✅ ${form_name}: ${ZIP_BASENAME}"
+            fi
+          done
+
+          echo "📋 Artifact information:"
+          cat artifact_info.json
+
+      # Copy only the NEW ZIPs to a staging directory for artifact upload
+      - name: Stage new ZIPs for upload
+        if: steps.changed_forms.outputs.no_changes != 'true'
+        run: |
+          echo "📦 Staging new ZIPs for artifact upload..."
+          mkdir -p artifact-staging
+
+          CHANGED_FORMS="${{ steps.changed_forms.outputs.changed_forms }}"
+
+          for form_name in $CHANGED_FORMS; do
+            if [ -d "$form_name/upload" ]; then
+              # Get the NEWEST ZIP (the one we just created)
+              ZIP_FILE=$(ls -t "$form_name/upload/"*.zip 2>/dev/null | head -1)
+              if [ -n "$ZIP_FILE" ]; then
+                # Preserve directory structure: form-name/upload/file.zip
+                mkdir -p "artifact-staging/$form_name/upload"
+                cp "$ZIP_FILE" "artifact-staging/$form_name/upload/"
+                echo "  ✅ Staged: $(basename $ZIP_FILE)"
+              fi
+            fi
+          done
+
+          echo ""
+          echo "📋 Staged files:"
+          find artifact-staging -name "*.zip" -ls
+
+      # Upload only the NEW ZIPs as a temporary artifact for the second job
+      - name: Upload ZIPs for artifact job
+        if: steps.changed_forms.outputs.no_changes != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-zips-temp
+          path: artifact-staging/*/upload/*.zip
+          retention-days: 1  # Temporary, just for passing to next job
+
+      - name: Commit and push deployment ZIPs and updated package.json files
+        if: steps.changed_forms.outputs.no_changes != 'true'
+        run: |
+          echo "📝 Committing deployment ZIPs and updated package.json files..."
+
+          # Configurar git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Agregar archivos ZIP, directorio upload/, y package.json actualizados
+          git add */upload/*.zip || true
+          git add */upload/ || true
+          git add */package.json || true
+
+          # Verificar si hay cambios
+          if git diff --staged --quiet; then
+            echo "⚠️  No changes to commit"
+          else
+            # Obtener lista de forms con versiones para el commit message
+            FORMS_WITH_VERSIONS=""
+            CHANGED_FORMS="${{ steps.changed_forms.outputs.changed_forms }}"
+            for form_name in $CHANGED_FORMS; do
+              if [ -f "$form_name/package.json" ]; then
+                FORM_VERSION=$(jq -r '.version' "$form_name/package.json")
+                FORMS_WITH_VERSIONS="${FORMS_WITH_VERSIONS}\n  - $form_name: v$FORM_VERSION"
+              fi
+            done
+
+            # Crear commit
+            git commit -m "chore: update versions and add deployment ZIPs [skip ci]" \
+                       -m "Generated by workflow run #${{ github.run_number }}" \
+                       -m "Commit: ${{ steps.build_metadata.outputs.commit_hash }}" \
+                       -m "" \
+                       -m "Updated forms:${FORMS_WITH_VERSIONS}" \
+                       -m "" \
+                       -m "🤖 Automated commit by GitHub Actions"
+
+            # Pull con rebase antes de push para evitar race conditions
+            echo "🔄 Pulling latest changes with rebase..."
+            git pull --rebase origin main || {
+              echo "⚠️  Rebase failed, aborting and retrying with merge strategy..."
+              git rebase --abort 2>/dev/null || true
+              git pull --no-rebase origin main
+            }
+
+            # Push usando el token del workflow
+            echo "📤 Pushing changes to repository..."
+            git push origin HEAD:main
+
+            echo "✅ Changes committed and pushed to repository"
+          fi
+
+      # Tags removed - package.json is now the source of truth for versioning
+      # No need for git tags, versions are managed through package.json auto-increment
+      - name: Create release (if manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Custom Forms Deployment v${{ steps.version.outputs.version }}
+          body: |
+            ## 📦 Deployment Package - Offline Installation
+
+            **Version**: ${{ steps.version.outputs.version }}
+            **Commit**: [`${{ steps.version.outputs.short_hash }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ steps.version.outputs.commit_hash }})
+            **Build Date**: ${{ steps.version.outputs.build_date }}
+            **Forms included**: ${{ steps.manifest.outputs.form_count }}
+
+            ### 🔗 Traceability
+
+            This package is directly linked to git:
+            - **Package filename**: Contains version + commit hash for easy identification
+            - **VERSION.txt**: Full git information inside the ZIP
+            - **manifest.json**: Direct URLs to commit, tag, and workflow run
+
+            ### 📥 Installation Instructions
+
+            Each form has its own deployment ZIP:
+            - Download `{form-name}-deployment-${{ steps.version.outputs.version }}-${{ steps.version.outputs.short_hash }}.zip`
+            - Transfer to offline server (USB, network share, etc.)
+            - Access: `https://your-server.com/BIZUITCustomForms/admin/upload-forms`
+            - Upload the ZIP file directly (no need to extract first)
+            - Verify deployment success
+
+            ### 📋 Forms in this package
+
+            Check `manifest.json` or `VERSION.txt` inside each ZIP for complete information.
+
+            ---
+
+            🤖 Generated automatically by GitHub Actions - [View workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          files: |
+            *-deployment-${{ steps.version.outputs.version }}-${{ steps.version.outputs.short_hash }}.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary (No changes)
+        if: steps.changed_forms.outputs.no_changes == 'true'
+        run: |
+          echo "## ℹ️ No Forms Changed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "No form files were modified in this push. No deployment packages were created." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The workflow monitors changes to:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`*/src/**\` - Source files of forms" >> $GITHUB_STEP_SUMMARY
+          echo "- \`*/package.json\` - Package configuration of forms" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "If you expected forms to be built, verify that your changes are in the correct directories." >> $GITHUB_STEP_SUMMARY
+
+      - name: Summary
+        if: steps.changed_forms.outputs.no_changes != 'true'
+        run: |
+          echo "## 🎉 Deployment Package Built Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Build Date**: ${{ steps.build_metadata.outputs.build_date }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit**: ${{ steps.build_metadata.outputs.commit_hash }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Forms Built**: ${{ steps.manifest.outputs.form_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Forms with Independent Versions" >> $GITHUB_STEP_SUMMARY
+
+          # Listar forms con sus versiones y tags
+          CHANGED_FORMS="${{ steps.changed_forms.outputs.changed_forms }}"
+          for form_name in $CHANGED_FORMS; do
+            if [ -f "$form_name/package.json" ]; then
+              FORM_VERSION=$(jq -r '.version' "$form_name/package.json")
+              echo "- **$form_name**: v$FORM_VERSION (tag: \`${form_name}-v${FORM_VERSION}\`)" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📥 Download" >> $GITHUB_STEP_SUMMARY
+          echo "Go to **Actions** → **Artifacts** to download individual form deployment packages" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📤 Upload Instructions" >> $GITHUB_STEP_SUMMARY
+          echo "1. Download the artifact from GitHub Actions (will be a ZIP file)" >> $GITHUB_STEP_SUMMARY
+          echo "2. Extract the ZIP - you'll find the deployment package inside" >> $GITHUB_STEP_SUMMARY
+          echo "3. Transfer the inner ZIP to offline server" >> $GITHUB_STEP_SUMMARY
+          echo "4. Upload via: \`/admin/upload-forms\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Alternative:** Use ZIPs from \`{form-name}/upload/\` directory in the repository (already committed)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ℹ️ Versioning System" >> $GITHUB_STEP_SUMMARY
+          echo "- Each form has **independent versioning**" >> $GITHUB_STEP_SUMMARY
+          echo "- **package.json** is the source of truth" >> $GITHUB_STEP_SUMMARY
+          echo "- Versions auto-increment (PATCH) on every change" >> $GITHUB_STEP_SUMMARY
+          echo "- Simple and predictable: v1.0.0 → v1.0.1 → v1.0.2..." >> $GITHUB_STEP_SUMMARY
+
+  # Second job: Upload artifacts per form using matrix strategy
+  upload-artifacts:
+    name: Upload artifact for ${{ matrix.form }}
+    needs: build-deployment-package
+    if: needs.build-deployment-package.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        form: ${{ fromJson(needs.build-deployment-package.outputs.changed_forms_json) }}
+
+    steps:
+      - name: Download build ZIPs
+        uses: actions/download-artifact@v4
+        with:
+          name: build-zips-temp
+
+      - name: Extract ZIP contents for artifact
+        id: artifact_info
+        run: |
+          # Get the ZIP file for this form from the downloaded artifacts
+          if [ -d "${{ matrix.form }}/upload" ]; then
+            ZIP_FILE=$(ls -t ${{ matrix.form }}/upload/*.zip 2>/dev/null | head -1)
+            if [ -n "$ZIP_FILE" ]; then
+              ZIP_BASENAME=$(basename "$ZIP_FILE" .zip)
+
+              # Extract ZIP contents to avoid double-zipping by GitHub Actions
+              EXTRACT_DIR="artifact-${ZIP_BASENAME}"
+              mkdir -p "$EXTRACT_DIR"
+              unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
+
+              echo "artifact_name=$ZIP_BASENAME" >> $GITHUB_OUTPUT
+              echo "artifact_path=$EXTRACT_DIR" >> $GITHUB_OUTPUT
+
+              echo "✅ Found and extracted: $ZIP_BASENAME"
+              echo "   Extracted to: $EXTRACT_DIR"
+              echo "   Contents:"
+              ls -lh "$EXTRACT_DIR"
+            else
+              echo "❌ No ZIP found for ${{ matrix.form }}"
+              exit 1
+            fi
+          else
+            echo "❌ Upload directory not found for ${{ matrix.form }}"
+            exit 1
+          fi
+
+      - name: Upload artifact (extracted contents)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact_info.outputs.artifact_name }}
+          path: ${{ steps.artifact_info.outputs.artifact_path }}
+          retention-days: 90
+
+  # Cleanup job: Delete temporary artifact after all uploads complete
+  cleanup-temp-artifact:
+    name: Cleanup temporary artifact
+    needs: upload-artifacts
+    if: always() && needs.build-deployment-package.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete build-zips-temp artifact
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: build-zips-temp
+          failOnError: false
