@@ -53,7 +53,7 @@ var require_react_dom = __commonJS({
 var import_react8 = __toESM(require_react(), 1);
 
 // package.json
-var version = "1.0.5";
+var version = "1.0.7";
 
 // node_modules/clsx/dist/clsx.mjs
 function r(e) {

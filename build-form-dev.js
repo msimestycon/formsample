@@ -60,6 +60,32 @@ async function buildForm() {
 
     const stats = fs.statSync(config.outfile);
     console.log(`✅ Build successful! Size: ${(stats.size / 1024).toFixed(2)} KB`);
+
+    // Copy dev-credentials.js to dist/ if it exists
+    const formDir = path.dirname(config.entryPoint); // Get form directory (where src/ is)
+    const devCredsSrc = path.join(formDir, '..', 'dev-credentials.js'); // Up one level from src/
+    const devCredsDest = path.join(distDir, 'dev-credentials.js');
+
+    if (fs.existsSync(devCredsSrc)) {
+      fs.copyFileSync(devCredsSrc, devCredsDest);
+      console.log('📋 Copied dev-credentials.js to dist/');
+    } else {
+      // Copy example file if dev-credentials.js doesn't exist
+      const exampleSrc = path.join(formDir, '..', 'dev-credentials.example.js');
+      if (fs.existsSync(exampleSrc)) {
+        fs.copyFileSync(exampleSrc, devCredsDest);
+        console.log('📋 Copied dev-credentials.example.js to dist/dev-credentials.js');
+        console.log('⚠️  Edit dist/dev-credentials.js with your actual credentials');
+      }
+    }
+
+    // Copy dev.html to dist/
+    const devHtmlSrc = path.join(formDir, '..', 'dev.html');
+    const devHtmlDest = path.join(distDir, 'dev.html');
+    if (fs.existsSync(devHtmlSrc)) {
+      fs.copyFileSync(devHtmlSrc, devHtmlDest);
+      console.log('📋 Copied dev.html to dist/');
+    }
   } catch (error) {
     console.error('❌ Build failed:', error);
     process.exit(1);

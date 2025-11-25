@@ -33,7 +33,28 @@ This template provides a complete, production-ready structure for building BIZUI
 npm install
 ```
 
-### 2. Test with Fat Bundle (Fastest)
+### 2. Setup Development Credentials
+
+```bash
+# Copy the credentials template
+cp dev-credentials.example.js dev-credentials.js
+
+# Edit with your Dashboard credentials
+nano dev-credentials.js
+```
+
+**Edit dev-credentials.js** with your actual credentials:
+```javascript
+export const DEV_CREDENTIALS = {
+  username: 'your.email@company.com',
+  password: 'YourPassword',
+  apiUrl: 'https://test.bizuit.com/{yourTenant}BizuitDashboardapi/api/'
+};
+```
+
+⚠️ **IMPORTANT:** This file is in `.gitignore` and won't be committed.
+
+### 3. Test with Fat Bundle (Fastest)
 
 ```bash
 # Build fat bundle
@@ -47,7 +68,9 @@ python3 -m http.server 8080
 open http://localhost:8080/dev.html
 ```
 
-### 3. Test on Runtime (Production-like)
+The form will automatically use your dev-credentials.js for authentication.
+
+### 4. Test on Runtime (Production-like)
 
 For complete testing with SDK calls and database:
 

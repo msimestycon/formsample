@@ -19,16 +19,24 @@ This guide includes:
 ## 🚀 Quick Start
 
 ```bash
-# From form-template directory
+# 1. Install dependencies
 npm install
+
+# 2. Setup dev credentials (REQUIRED for local testing)
+cp dev-credentials.example.js dev-credentials.js
+# Edit dev-credentials.js with your Dashboard credentials
+
+# 3. Build form
 npm run build
 
-# Serve locally
+# 4. Serve locally
 cd dist
 python3 -m http.server 8080
 
-# Open browser
+# 5. Open browser
 open http://localhost:8080/dev.html
 ```
+
+⚠️ **Important:** The form needs `dev-credentials.js` for authentication during local testing.
 
 For detailed instructions, see [FORM_DEVELOPMENT_GUIDE.md](../FORM_DEVELOPMENT_GUIDE.md).
