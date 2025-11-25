@@ -89,11 +89,11 @@ npm install
 ⚠️ **IMPORTANTE:** Configura las credenciales ANTES de probar el form.
 
 ```bash
-# Crear archivo de credenciales
-cp ../runtime-app/dev-credentials.js.example ../runtime-app/dev-credentials.js
+# Desde form-template, crear archivo de credenciales
+cp dev-credentials.example.js dev-credentials.js
 
 # Editar con tus credenciales de Bizuit
-nano ../runtime-app/dev-credentials.js
+nano dev-credentials.js
 ```
 
 Ver [DEVELOPMENT.md#setup-de-credenciales-de-desarrollo](DEVELOPMENT.md#setup-de-credenciales-de-desarrollo) para configuración detallada.
@@ -204,7 +204,7 @@ Para testing completo con SDK calls y database (credenciales ya configuradas en 
    http://localhost:3001/form/mi-nuevo-form
    ```
 
-**Nota:** Los dev credentials y .env.local están en `runtime-app/`, NO en el directorio del form.
+**Nota:** Para testing en runtime necesitas el proyecto principal con `runtime-app/` corriendo. Los dev credentials del form están en el directorio del form (ej: `form-template/dev-credentials.js`).
 
 ---
 
