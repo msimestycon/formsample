@@ -247,12 +247,14 @@ open http://localhost:8080/dev.html
 **Pros**:
 - ⚡ Fast rebuilds (< 1 second)
 - ⚡ Instant browser refresh
-- ❌ No backend needed
 - ✅ Perfect for UI iterations
+- ✅ Can test real SDK calls (uncomment auth code in src/index.tsx lines 110-126)
+- ✅ Optional backend - UI works without it, SDK needs backend running
 
 **Cons**:
-- ❌ Can't test real SDK calls
-- ❌ Need mock data
+- ⚠️ SDK auth code is commented out by default (template shows structure)
+- ⚠️ Uses mock data until you uncomment SDK authentication code
+- ⚠️ Requires backend running on port 8000 for real SDK calls
 
 ### Workflow 2: Runtime Testing (Production-like)
 
@@ -323,14 +325,20 @@ nano dev-credentials.js
 **File**: `../runtime-app/.env.local` (for runtime app)
 
 ```env
-# Enable dev mode for local testing (CRITICAL)
-ALLOW_DEV_MODE=true  # ← MUST be true for local development
+# Enable dev mode for local testing (CRITICAL SECURITY)
+# IMPORTANT: Must use NEXT_PUBLIC_ prefix for client-side access
+NEXT_PUBLIC_ALLOW_DEV_MODE=true  # ← Set to 'true' for development, 'false' for production
 
 # Dashboard API (CORS proxy for local dev)
 NEXT_PUBLIC_BIZUIT_DASHBOARD_API_URL=/api/bizuit
 
-# Backend API
+# Backend API (server-side only)
 FASTAPI_URL=http://127.0.0.1:8000
+
+# Development credentials (used when NEXT_PUBLIC_ALLOW_DEV_MODE=true)
+DEV_USERNAME=your-dashboard-username
+DEV_PASSWORD=your-dashboard-password
+DEV_API_URL=https://test.bizuit.com/yourTenantBizuitDashboardapi/api/
 
 # Session & Security
 NEXT_PUBLIC_SESSION_TIMEOUT_MINUTES=30
@@ -438,7 +446,16 @@ npm install
 ```bash
 # Check SDK_CONFIG.processName matches your actual process
 # Check Dashboard API is accessible
-# Check dev-credentials.js has correct values (in runtime-app/)
+
+# For Fat Bundle (dev.html):
+# - Check dev-credentials.js in form directory (e.g., form-template/dev-credentials.js)
+# - Verify SDK authentication code is uncommented (src/index.tsx lines 110-126)
+# - Ensure backend is running on port 8000
+
+# For Runtime App:
+# - Check .env.local variables in runtime-app/:
+#   DEV_USERNAME, DEV_PASSWORD, DEV_API_URL
+#   NEXT_PUBLIC_ALLOW_DEV_MODE=true
 ```
 
 ### "Form not rendering"
