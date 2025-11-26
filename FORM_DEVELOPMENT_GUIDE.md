@@ -70,19 +70,20 @@ open http://localhost:8080/dev.html
 
 The form will automatically use your dev-credentials.js for authentication.
 
-### 4. Test on Runtime (Production-like)
+### 4. Test on Runtime Environment
 
-For complete testing with SDK calls and database:
+For complete testing with SDK calls and database integration:
 
+**Option A: Local Runtime (Full Stack)**
 ```bash
 # Build form
 npm run build
 
-# Start runtime app (from project root)
+# Start all services (from project root)
 cd ../../
 ./start-all.sh
 
-# Upload ZIP via admin
+# Upload ZIP via admin panel
 open http://localhost:3001/admin/upload-forms
 # Upload the generated ZIP from form-template/upload/
 
@@ -90,7 +91,20 @@ open http://localhost:3001/admin/upload-forms
 open http://localhost:3001/form/form-template
 ```
 
-**Note:** For runtime testing, you'll need dev credentials configured in `runtime-app/`. See the main [DEVELOPMENT.md](DEVELOPMENT.md#setup-de-credenciales-de-desarrollo) guide.
+**Option B: Remote Environment (Dev/QA/Prod)**
+```bash
+# Build form
+npm run build
+
+# Upload to remote environment
+# Navigate to: https://{your-server}/admin/upload-forms
+# Upload the generated ZIP from form-template/upload/
+
+# Test form
+# Navigate to: https://{your-server}/form/form-template
+```
+
+**Note:** Most developers use remote environments (dev/qa) instead of running the full stack locally. For local setup details, see [DEVELOPMENT.md](DEVELOPMENT.md#setup-de-credenciales-de-desarrollo).
 
 ---
 
@@ -255,6 +269,20 @@ open http://localhost:8080/dev.html
 
 **Use when**: SDK integration, process testing, final validation
 
+**Option A: Remote Environment (Recommended)**
+```bash
+# Build form
+npm run build
+
+# Upload to dev/qa/prod environment
+# Navigate to: https://{your-server}/admin/upload-forms
+# Upload the ZIP from form-template/upload/
+
+# Test form
+# Navigate to: https://{your-server}/form/form-template
+```
+
+**Option B: Local Runtime (Full Stack)**
 ```bash
 # Build form
 npm run build
@@ -274,10 +302,11 @@ open http://localhost:3001/form/form-template
 - ✅ Tests real SDK calls
 - ✅ Tests database loading
 - ✅ Production-like behavior
+- ✅ Can use remote environments (no local setup needed)
 
 **Cons**:
 - 🐢 Slower (need upload each change)
-- 🐢 Backend required
+- 🐢 Local option requires backend setup
 
 ---
 
@@ -392,8 +421,9 @@ npm run build
 cd dist
 zip -r ../form-template-deployment.zip .
 
-# Upload via admin panel
-open http://localhost:3001/admin/upload-forms
+# Upload via admin panel (local or remote)
+# Local: http://localhost:3001/admin/upload-forms
+# Remote: https://{your-server}/admin/upload-forms
 ```
 
 ---
@@ -403,7 +433,9 @@ open http://localhost:3001/admin/upload-forms
 - **Main Repository Documentation**: [README.md](README.md)
 - **Development Guide**: [DEVELOPMENT.md](DEVELOPMENT.md)
 - **Deployment Guide**: [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)
-- **Interactive Docs**: `http://localhost:3001/docs`
+- **Interactive Docs**:
+  - Local: `http://localhost:3001/docs`
+  - Remote: `https://{your-server}/docs`
 - **SDK Documentation**: `../packages/bizuit-form-sdk/README.md`
 - **UI Components**: `../packages/bizuit-ui-components/README.md`
 
