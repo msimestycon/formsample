@@ -26,7 +26,7 @@ async function buildForm() {
       fs.mkdirSync(distDir, { recursive: true });
     }
 
-    const globalReactPlugin = {
+    const globalExternalsPlugin = {
       name: 'global-react',
       setup(build) {
         build.onResolve({ filter: /^react$/ }, args => ({ path: args.path, namespace: 'global-react' }))
@@ -51,7 +51,7 @@ async function buildForm() {
       target: ['es2020'],
       minify: false,
       sourcemap: true,
-      plugins: [globalReactPlugin],
+      plugins: [globalExternalsPlugin],
       jsx: 'transform',
       jsxFactory: 'React.createElement',
       jsxFragment: 'React.Fragment',
