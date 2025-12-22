@@ -43,7 +43,9 @@ bizuit-custom-form-sample/
 │
 ├── form-template/                         # ⭐ Template base para nuevos forms
 │   ├── src/
-│   │   └── index.tsx                      # Form source code
+│   │   ├── index.tsx                      # Form source code
+│   │   └── utils/
+│   │       └── sentry.ts                  # GlitchTip/Sentry integration
 │   ├── dist/                              # Build output (generated)
 │   │   ├── form.js                        # Compiled bundle
 │   │   └── dev.html                       # Test page
@@ -403,6 +405,48 @@ mi-form-deployment-1.0.5-abc1234.zip
 ## 🔄 Hot Reload
 
 El runtime hace polling cada **10 segundos** a `/api/custom-forms/versions`. Si detecta una nueva versión, recarga el form automáticamente **SIN reiniciar** IIS ni Next.js.
+
+---
+
+## 📊 Logging con GlitchTip
+
+El template incluye integración con **GlitchTip** (compatible con Sentry) para capturar logs en producción.
+
+### Cómo Funciona
+
+| Función | Dev (DEV_MODE=true) | Producción |
+|---------|---------------------|------------|
+| `console.log(...)` | Visible en consola | Silenciado (breadcrumb en GlitchTip) |
+| `console.warn(...)` | Visible en consola | Silenciado (evento en GlitchTip) |
+| `console.error(...)` | Visible en consola | Visible + evento en GlitchTip |
+
+### Configuración
+
+1. **Crear cuenta en GlitchTip:** https://app.glitchtip.com/
+2. **Crear proyecto** y copiar el DSN
+3. **Editar `src/utils/sentry.ts`:**
+   ```typescript
+   dsn: "https://YOUR_KEY@app.glitchtip.com/YOUR_PROJECT_ID",
+   ```
+4. **(Opcional)** Configurar Allowed Domains en GlitchTip → Settings → Security
+
+### Uso para Desarrolladores
+
+Escribir código normal con `console.*`:
+
+```typescript
+console.log('Cargando datos...');
+console.warn('Advertencia: campo vacío');
+console.error('Error crítico:', error);
+```
+
+En producción, GlitchTip intercepta automáticamente. No se necesita código especial.
+
+### Dashboard
+
+Ver logs en: https://app.glitchtip.com/
+
+**Nota:** El DSN está expuesto en el bundle JavaScript - esto es normal para frontend. La seguridad se configura en GlitchTip con Allowed Domains.
 
 ---
 
