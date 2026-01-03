@@ -30,6 +30,29 @@ async function buildForm() {
       fs.mkdirSync(distDir, { recursive: true });
     }
 
+    // Plugin to inline CSS as JavaScript
+    const inlineCSSPlugin = {
+      name: 'inline-css',
+      setup(build) {
+        build.onLoad({ filter: /\.css$/ }, async (args) => {
+          const css = await fs.promises.readFile(args.path, 'utf8');
+          // Escape backticks and backslashes in CSS
+          const escapedCSS = css.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
+          // Inject CSS into document head
+          const contents = `
+            (function() {
+              if (typeof document !== 'undefined') {
+                const style = document.createElement('style');
+                style.textContent = \`${escapedCSS}\`;
+                document.head.appendChild(style);
+              }
+            })();
+          `;
+          return { contents, loader: 'js' };
+        });
+      },
+    };
+
     // Plugin to replace React and Bizuit packages with global references
     const globalExternalsPlugin = {
       name: 'global-externals',
@@ -92,8 +115,8 @@ async function buildForm() {
       minify: true,
       sourcemap: true,
 
-      // Use plugin to inject global references for React and Bizuit packages
-      plugins: [globalExternalsPlugin],
+      // Use plugins to inline CSS and inject global references
+      plugins: [inlineCSSPlugin, globalExternalsPlugin],
 
       // Replace React imports with global references
       banner: {

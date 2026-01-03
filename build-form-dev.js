@@ -26,6 +26,29 @@ async function buildForm() {
       fs.mkdirSync(distDir, { recursive: true });
     }
 
+    // Plugin to inline CSS as JavaScript
+    const inlineCSSPlugin = {
+      name: 'inline-css',
+      setup(build) {
+        build.onLoad({ filter: /\.css$/ }, async (args) => {
+          const css = await fs.promises.readFile(args.path, 'utf8');
+          // Escape backticks and backslashes in CSS
+          const escapedCSS = css.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
+          // Inject CSS into document head
+          const contents = `
+            (function() {
+              if (typeof document !== 'undefined') {
+                const style = document.createElement('style');
+                style.textContent = \`${escapedCSS}\`;
+                document.head.appendChild(style);
+              }
+            })();
+          `;
+          return { contents, loader: 'js' };
+        });
+      },
+    };
+
     const globalReactPlugin = {
       name: 'global-react',
       setup(build) {
@@ -79,7 +102,7 @@ async function buildForm() {
       target: ['es2020'],
       minify: false,
       sourcemap: true,
-      plugins: [globalReactPlugin],
+      plugins: [inlineCSSPlugin, globalReactPlugin],
       jsx: 'transform',
       jsxFactory: 'React.createElement',
       jsxFragment: 'React.Fragment',
