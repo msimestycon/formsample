@@ -200,7 +200,7 @@ export default function FormTemplate({ dashboardParams }: FormProps) {
                     </svg>
                   </div>
                   <div>
-                    <h1 className="text-3xl font-bold text-gray-900">Form Template - {new Date().toLocaleString('es-AR', {
+                    <h1 className="text-3xl font-bold text-green-600">Form Template - {new Date().toLocaleString('es-AR', {
                       day: '2-digit',
                       month: '2-digit',
                       year: 'numeric',
