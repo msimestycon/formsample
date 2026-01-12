@@ -38,7 +38,24 @@ var require_react = __commonJS({
 // global-react:react/jsx-runtime
 var require_jsx_runtime = __commonJS({
   "global-react:react/jsx-runtime"(exports, module) {
-    module.exports = { jsx: window.React.createElement, jsxs: window.React.createElement, Fragment: window.React.Fragment };
+    function createElementWithKey(type, props, key) {
+      if (key !== void 0 && props) {
+        props = Object.assign({}, props, { key });
+      }
+      var children = props && props.children;
+      delete props.children;
+      if (Array.isArray(children)) {
+        return window.React.createElement.apply(null, [type, props].concat(children));
+      } else if (children !== void 0) {
+        return window.React.createElement(type, props, children);
+      }
+      return window.React.createElement(type, props);
+    }
+    module.exports = {
+      jsx: createElementWithKey,
+      jsxs: createElementWithKey,
+      Fragment: window.React.Fragment
+    };
   }
 });
 
@@ -49,11 +66,6106 @@ var require_react_dom = __commonJS({
   }
 });
 
+// node_modules/@sentry/core/build/esm/debug-build.js
+var DEBUG_BUILD = typeof __SENTRY_DEBUG__ === "undefined" || __SENTRY_DEBUG__;
+
+// node_modules/@sentry/core/build/esm/utils/worldwide.js
+var GLOBAL_OBJ = globalThis;
+
+// node_modules/@sentry/core/build/esm/utils/version.js
+var SDK_VERSION = "9.47.1";
+
+// node_modules/@sentry/core/build/esm/carrier.js
+function getMainCarrier() {
+  getSentryCarrier(GLOBAL_OBJ);
+  return GLOBAL_OBJ;
+}
+function getSentryCarrier(carrier) {
+  const __SENTRY__ = carrier.__SENTRY__ = carrier.__SENTRY__ || {};
+  __SENTRY__.version = __SENTRY__.version || SDK_VERSION;
+  return __SENTRY__[SDK_VERSION] = __SENTRY__[SDK_VERSION] || {};
+}
+function getGlobalSingleton(name, creator, obj = GLOBAL_OBJ) {
+  const __SENTRY__ = obj.__SENTRY__ = obj.__SENTRY__ || {};
+  const carrier = __SENTRY__[SDK_VERSION] = __SENTRY__[SDK_VERSION] || {};
+  return carrier[name] || (carrier[name] = creator());
+}
+
+// node_modules/@sentry/core/build/esm/utils/debug-logger.js
+var CONSOLE_LEVELS = [
+  "debug",
+  "info",
+  "warn",
+  "error",
+  "log",
+  "assert",
+  "trace"
+];
+var PREFIX = "Sentry Logger ";
+var originalConsoleMethods = {};
+function consoleSandbox(callback) {
+  if (!("console" in GLOBAL_OBJ)) {
+    return callback();
+  }
+  const console2 = GLOBAL_OBJ.console;
+  const wrappedFuncs = {};
+  const wrappedLevels = Object.keys(originalConsoleMethods);
+  wrappedLevels.forEach((level) => {
+    const originalConsoleMethod = originalConsoleMethods[level];
+    wrappedFuncs[level] = console2[level];
+    console2[level] = originalConsoleMethod;
+  });
+  try {
+    return callback();
+  } finally {
+    wrappedLevels.forEach((level) => {
+      console2[level] = wrappedFuncs[level];
+    });
+  }
+}
+function enable() {
+  _getLoggerSettings().enabled = true;
+}
+function disable() {
+  _getLoggerSettings().enabled = false;
+}
+function isEnabled() {
+  return _getLoggerSettings().enabled;
+}
+function log(...args) {
+  _maybeLog("log", ...args);
+}
+function warn(...args) {
+  _maybeLog("warn", ...args);
+}
+function error(...args) {
+  _maybeLog("error", ...args);
+}
+function _maybeLog(level, ...args) {
+  if (!DEBUG_BUILD) {
+    return;
+  }
+  if (isEnabled()) {
+    consoleSandbox(() => {
+      GLOBAL_OBJ.console[level](`${PREFIX}[${level}]:`, ...args);
+    });
+  }
+}
+function _getLoggerSettings() {
+  if (!DEBUG_BUILD) {
+    return { enabled: false };
+  }
+  return getGlobalSingleton("loggerSettings", () => ({ enabled: false }));
+}
+var debug = {
+  /** Enable logging. */
+  enable,
+  /** Disable logging. */
+  disable,
+  /** Check if logging is enabled. */
+  isEnabled,
+  /** Log a message. */
+  log,
+  /** Log a warning. */
+  warn,
+  /** Log an error. */
+  error
+};
+
+// node_modules/@sentry/core/build/esm/utils/stacktrace.js
+var STACKTRACE_FRAME_LIMIT = 50;
+var UNKNOWN_FUNCTION = "?";
+var WEBPACK_ERROR_REGEXP = /\(error: (.*)\)/;
+var STRIP_FRAME_REGEXP = /captureMessage|captureException/;
+function createStackParser(...parsers) {
+  const sortedParsers = parsers.sort((a, b) => a[0] - b[0]).map((p) => p[1]);
+  return (stack, skipFirstLines = 0, framesToPop = 0) => {
+    const frames = [];
+    const lines = stack.split("\n");
+    for (let i = skipFirstLines; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.length > 1024) {
+        continue;
+      }
+      const cleanedLine = WEBPACK_ERROR_REGEXP.test(line) ? line.replace(WEBPACK_ERROR_REGEXP, "$1") : line;
+      if (cleanedLine.match(/\S*Error: /)) {
+        continue;
+      }
+      for (const parser of sortedParsers) {
+        const frame = parser(cleanedLine);
+        if (frame) {
+          frames.push(frame);
+          break;
+        }
+      }
+      if (frames.length >= STACKTRACE_FRAME_LIMIT + framesToPop) {
+        break;
+      }
+    }
+    return stripSentryFramesAndReverse(frames.slice(framesToPop));
+  };
+}
+function stackParserFromStackParserOptions(stackParser) {
+  if (Array.isArray(stackParser)) {
+    return createStackParser(...stackParser);
+  }
+  return stackParser;
+}
+function stripSentryFramesAndReverse(stack) {
+  if (!stack.length) {
+    return [];
+  }
+  const localStack = Array.from(stack);
+  if (/sentryWrapped/.test(getLastStackFrame(localStack).function || "")) {
+    localStack.pop();
+  }
+  localStack.reverse();
+  if (STRIP_FRAME_REGEXP.test(getLastStackFrame(localStack).function || "")) {
+    localStack.pop();
+    if (STRIP_FRAME_REGEXP.test(getLastStackFrame(localStack).function || "")) {
+      localStack.pop();
+    }
+  }
+  return localStack.slice(0, STACKTRACE_FRAME_LIMIT).map((frame) => ({
+    ...frame,
+    filename: frame.filename || getLastStackFrame(localStack).filename,
+    function: frame.function || UNKNOWN_FUNCTION
+  }));
+}
+function getLastStackFrame(arr) {
+  return arr[arr.length - 1] || {};
+}
+var defaultFunctionName = "<anonymous>";
+function getFunctionName(fn) {
+  try {
+    if (!fn || typeof fn !== "function") {
+      return defaultFunctionName;
+    }
+    return fn.name || defaultFunctionName;
+  } catch {
+    return defaultFunctionName;
+  }
+}
+function getFramesFromEvent(event) {
+  const exception = event.exception;
+  if (exception) {
+    const frames = [];
+    try {
+      exception.values.forEach((value) => {
+        if (value.stacktrace.frames) {
+          frames.push(...value.stacktrace.frames);
+        }
+      });
+      return frames;
+    } catch {
+      return void 0;
+    }
+  }
+  return void 0;
+}
+
+// node_modules/@sentry/core/build/esm/instrument/handlers.js
+var handlers = {};
+var instrumented = {};
+function addHandler(type, handler) {
+  handlers[type] = handlers[type] || [];
+  handlers[type].push(handler);
+}
+function maybeInstrument(type, instrumentFn) {
+  if (!instrumented[type]) {
+    instrumented[type] = true;
+    try {
+      instrumentFn();
+    } catch (e) {
+      DEBUG_BUILD && debug.error(`Error while instrumenting ${type}`, e);
+    }
+  }
+}
+function triggerHandlers(type, data) {
+  const typeHandlers = type && handlers[type];
+  if (!typeHandlers) {
+    return;
+  }
+  for (const handler of typeHandlers) {
+    try {
+      handler(data);
+    } catch (e) {
+      DEBUG_BUILD && debug.error(
+        `Error while triggering instrumentation handler.
+Type: ${type}
+Name: ${getFunctionName(handler)}
+Error:`,
+        e
+      );
+    }
+  }
+}
+
+// node_modules/@sentry/core/build/esm/instrument/globalError.js
+var _oldOnErrorHandler = null;
+function addGlobalErrorInstrumentationHandler(handler) {
+  const type = "error";
+  addHandler(type, handler);
+  maybeInstrument(type, instrumentError);
+}
+function instrumentError() {
+  _oldOnErrorHandler = GLOBAL_OBJ.onerror;
+  GLOBAL_OBJ.onerror = function(msg, url, line, column, error2) {
+    const handlerData = {
+      column,
+      error: error2,
+      line,
+      msg,
+      url
+    };
+    triggerHandlers("error", handlerData);
+    if (_oldOnErrorHandler) {
+      return _oldOnErrorHandler.apply(this, arguments);
+    }
+    return false;
+  };
+  GLOBAL_OBJ.onerror.__SENTRY_INSTRUMENTED__ = true;
+}
+
+// node_modules/@sentry/core/build/esm/instrument/globalUnhandledRejection.js
+var _oldOnUnhandledRejectionHandler = null;
+function addGlobalUnhandledRejectionInstrumentationHandler(handler) {
+  const type = "unhandledrejection";
+  addHandler(type, handler);
+  maybeInstrument(type, instrumentUnhandledRejection);
+}
+function instrumentUnhandledRejection() {
+  _oldOnUnhandledRejectionHandler = GLOBAL_OBJ.onunhandledrejection;
+  GLOBAL_OBJ.onunhandledrejection = function(e) {
+    const handlerData = e;
+    triggerHandlers("unhandledrejection", handlerData);
+    if (_oldOnUnhandledRejectionHandler) {
+      return _oldOnUnhandledRejectionHandler.apply(this, arguments);
+    }
+    return true;
+  };
+  GLOBAL_OBJ.onunhandledrejection.__SENTRY_INSTRUMENTED__ = true;
+}
+
+// node_modules/@sentry/core/build/esm/utils/is.js
+var objectToString = Object.prototype.toString;
+function isError(wat) {
+  switch (objectToString.call(wat)) {
+    case "[object Error]":
+    case "[object Exception]":
+    case "[object DOMException]":
+    case "[object WebAssembly.Exception]":
+      return true;
+    default:
+      return isInstanceOf(wat, Error);
+  }
+}
+function isBuiltin(wat, className) {
+  return objectToString.call(wat) === `[object ${className}]`;
+}
+function isErrorEvent(wat) {
+  return isBuiltin(wat, "ErrorEvent");
+}
+function isDOMError(wat) {
+  return isBuiltin(wat, "DOMError");
+}
+function isDOMException(wat) {
+  return isBuiltin(wat, "DOMException");
+}
+function isString(wat) {
+  return isBuiltin(wat, "String");
+}
+function isParameterizedString(wat) {
+  return typeof wat === "object" && wat !== null && "__sentry_template_string__" in wat && "__sentry_template_values__" in wat;
+}
+function isPrimitive(wat) {
+  return wat === null || isParameterizedString(wat) || typeof wat !== "object" && typeof wat !== "function";
+}
+function isPlainObject(wat) {
+  return isBuiltin(wat, "Object");
+}
+function isEvent(wat) {
+  return typeof Event !== "undefined" && isInstanceOf(wat, Event);
+}
+function isElement(wat) {
+  return typeof Element !== "undefined" && isInstanceOf(wat, Element);
+}
+function isRegExp(wat) {
+  return isBuiltin(wat, "RegExp");
+}
+function isThenable(wat) {
+  return Boolean(wat?.then && typeof wat.then === "function");
+}
+function isSyntheticEvent(wat) {
+  return isPlainObject(wat) && "nativeEvent" in wat && "preventDefault" in wat && "stopPropagation" in wat;
+}
+function isInstanceOf(wat, base) {
+  try {
+    return wat instanceof base;
+  } catch {
+    return false;
+  }
+}
+function isVueViewModel(wat) {
+  return !!(typeof wat === "object" && wat !== null && (wat.__isVue || wat._isVue));
+}
+function isRequest(request) {
+  return typeof Request !== "undefined" && isInstanceOf(request, Request);
+}
+
+// node_modules/@sentry/core/build/esm/utils/browser.js
+var WINDOW = GLOBAL_OBJ;
+var DEFAULT_MAX_STRING_LENGTH = 80;
+function htmlTreeAsString(elem, options = {}) {
+  if (!elem) {
+    return "<unknown>";
+  }
+  try {
+    let currentElem = elem;
+    const MAX_TRAVERSE_HEIGHT = 5;
+    const out = [];
+    let height = 0;
+    let len = 0;
+    const separator = " > ";
+    const sepLength = separator.length;
+    let nextStr;
+    const keyAttrs = Array.isArray(options) ? options : options.keyAttrs;
+    const maxStringLength = !Array.isArray(options) && options.maxStringLength || DEFAULT_MAX_STRING_LENGTH;
+    while (currentElem && height++ < MAX_TRAVERSE_HEIGHT) {
+      nextStr = _htmlElementAsString(currentElem, keyAttrs);
+      if (nextStr === "html" || height > 1 && len + out.length * sepLength + nextStr.length >= maxStringLength) {
+        break;
+      }
+      out.push(nextStr);
+      len += nextStr.length;
+      currentElem = currentElem.parentNode;
+    }
+    return out.reverse().join(separator);
+  } catch {
+    return "<unknown>";
+  }
+}
+function _htmlElementAsString(el, keyAttrs) {
+  const elem = el;
+  const out = [];
+  if (!elem?.tagName) {
+    return "";
+  }
+  if (WINDOW.HTMLElement) {
+    if (elem instanceof HTMLElement && elem.dataset) {
+      if (elem.dataset["sentryComponent"]) {
+        return elem.dataset["sentryComponent"];
+      }
+      if (elem.dataset["sentryElement"]) {
+        return elem.dataset["sentryElement"];
+      }
+    }
+  }
+  out.push(elem.tagName.toLowerCase());
+  const keyAttrPairs = keyAttrs?.length ? keyAttrs.filter((keyAttr) => elem.getAttribute(keyAttr)).map((keyAttr) => [keyAttr, elem.getAttribute(keyAttr)]) : null;
+  if (keyAttrPairs?.length) {
+    keyAttrPairs.forEach((keyAttrPair) => {
+      out.push(`[${keyAttrPair[0]}="${keyAttrPair[1]}"]`);
+    });
+  } else {
+    if (elem.id) {
+      out.push(`#${elem.id}`);
+    }
+    const className = elem.className;
+    if (className && isString(className)) {
+      const classes = className.split(/\s+/);
+      for (const c of classes) {
+        out.push(`.${c}`);
+      }
+    }
+  }
+  const allowedAttrs = ["aria-label", "type", "name", "title", "alt"];
+  for (const k of allowedAttrs) {
+    const attr = elem.getAttribute(k);
+    if (attr) {
+      out.push(`[${k}="${attr}"]`);
+    }
+  }
+  return out.join("");
+}
+function getLocationHref() {
+  try {
+    return WINDOW.document.location.href;
+  } catch {
+    return "";
+  }
+}
+function getComponentName(elem) {
+  if (!WINDOW.HTMLElement) {
+    return null;
+  }
+  let currentElem = elem;
+  const MAX_TRAVERSE_HEIGHT = 5;
+  for (let i = 0; i < MAX_TRAVERSE_HEIGHT; i++) {
+    if (!currentElem) {
+      return null;
+    }
+    if (currentElem instanceof HTMLElement) {
+      if (currentElem.dataset["sentryComponent"]) {
+        return currentElem.dataset["sentryComponent"];
+      }
+      if (currentElem.dataset["sentryElement"]) {
+        return currentElem.dataset["sentryElement"];
+      }
+    }
+    currentElem = currentElem.parentNode;
+  }
+  return null;
+}
+
+// node_modules/@sentry/core/build/esm/utils/string.js
+function truncate(str, max = 0) {
+  if (typeof str !== "string" || max === 0) {
+    return str;
+  }
+  return str.length <= max ? str : `${str.slice(0, max)}...`;
+}
+function safeJoin(input, delimiter) {
+  if (!Array.isArray(input)) {
+    return "";
+  }
+  const output = [];
+  for (let i = 0; i < input.length; i++) {
+    const value = input[i];
+    try {
+      if (isVueViewModel(value)) {
+        output.push("[VueViewModel]");
+      } else {
+        output.push(String(value));
+      }
+    } catch {
+      output.push("[value cannot be serialized]");
+    }
+  }
+  return output.join(delimiter);
+}
+function isMatchingPattern(value, pattern, requireExactStringMatch = false) {
+  if (!isString(value)) {
+    return false;
+  }
+  if (isRegExp(pattern)) {
+    return pattern.test(value);
+  }
+  if (isString(pattern)) {
+    return requireExactStringMatch ? value === pattern : value.includes(pattern);
+  }
+  return false;
+}
+function stringMatchesSomePattern(testString, patterns = [], requireExactStringMatch = false) {
+  return patterns.some((pattern) => isMatchingPattern(testString, pattern, requireExactStringMatch));
+}
+
+// node_modules/@sentry/core/build/esm/utils/object.js
+function fill(source, name, replacementFactory) {
+  if (!(name in source)) {
+    return;
+  }
+  const original = source[name];
+  if (typeof original !== "function") {
+    return;
+  }
+  const wrapped = replacementFactory(original);
+  if (typeof wrapped === "function") {
+    markFunctionWrapped(wrapped, original);
+  }
+  try {
+    source[name] = wrapped;
+  } catch {
+    DEBUG_BUILD && debug.log(`Failed to replace method "${name}" in object`, source);
+  }
+}
+function addNonEnumerableProperty(obj, name, value) {
+  try {
+    Object.defineProperty(obj, name, {
+      // enumerable: false, // the default, so we can save on bundle size by not explicitly setting it
+      value,
+      writable: true,
+      configurable: true
+    });
+  } catch {
+    DEBUG_BUILD && debug.log(`Failed to add non-enumerable property "${name}" to object`, obj);
+  }
+}
+function markFunctionWrapped(wrapped, original) {
+  try {
+    const proto = original.prototype || {};
+    wrapped.prototype = original.prototype = proto;
+    addNonEnumerableProperty(wrapped, "__sentry_original__", original);
+  } catch {
+  }
+}
+function getOriginalFunction(func) {
+  return func.__sentry_original__;
+}
+function convertToPlainObject(value) {
+  if (isError(value)) {
+    return {
+      message: value.message,
+      name: value.name,
+      stack: value.stack,
+      ...getOwnProperties(value)
+    };
+  } else if (isEvent(value)) {
+    const newObj = {
+      type: value.type,
+      target: serializeEventTarget(value.target),
+      currentTarget: serializeEventTarget(value.currentTarget),
+      ...getOwnProperties(value)
+    };
+    if (typeof CustomEvent !== "undefined" && isInstanceOf(value, CustomEvent)) {
+      newObj.detail = value.detail;
+    }
+    return newObj;
+  } else {
+    return value;
+  }
+}
+function serializeEventTarget(target) {
+  try {
+    return isElement(target) ? htmlTreeAsString(target) : Object.prototype.toString.call(target);
+  } catch {
+    return "<unknown>";
+  }
+}
+function getOwnProperties(obj) {
+  if (typeof obj === "object" && obj !== null) {
+    const extractedProps = {};
+    for (const property in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, property)) {
+        extractedProps[property] = obj[property];
+      }
+    }
+    return extractedProps;
+  } else {
+    return {};
+  }
+}
+function extractExceptionKeysForMessage(exception, maxLength = 40) {
+  const keys = Object.keys(convertToPlainObject(exception));
+  keys.sort();
+  const firstKey = keys[0];
+  if (!firstKey) {
+    return "[object has no keys]";
+  }
+  if (firstKey.length >= maxLength) {
+    return truncate(firstKey, maxLength);
+  }
+  for (let includedKeys = keys.length; includedKeys > 0; includedKeys--) {
+    const serialized = keys.slice(0, includedKeys).join(", ");
+    if (serialized.length > maxLength) {
+      continue;
+    }
+    if (includedKeys === keys.length) {
+      return serialized;
+    }
+    return truncate(serialized, maxLength);
+  }
+  return "";
+}
+
+// node_modules/@sentry/core/build/esm/utils/misc.js
+function getCrypto() {
+  const gbl = GLOBAL_OBJ;
+  return gbl.crypto || gbl.msCrypto;
+}
+function uuid4(crypto = getCrypto()) {
+  let getRandomByte = () => Math.random() * 16;
+  try {
+    if (crypto?.randomUUID) {
+      return crypto.randomUUID().replace(/-/g, "");
+    }
+    if (crypto?.getRandomValues) {
+      getRandomByte = () => {
+        const typedArray = new Uint8Array(1);
+        crypto.getRandomValues(typedArray);
+        return typedArray[0];
+      };
+    }
+  } catch {
+  }
+  return ("10000000100040008000" + 1e11).replace(
+    /[018]/g,
+    (c) => (
+      // eslint-disable-next-line no-bitwise
+      (c ^ (getRandomByte() & 15) >> c / 4).toString(16)
+    )
+  );
+}
+function getFirstException(event) {
+  return event.exception?.values?.[0];
+}
+function getEventDescription(event) {
+  const { message, event_id: eventId } = event;
+  if (message) {
+    return message;
+  }
+  const firstException = getFirstException(event);
+  if (firstException) {
+    if (firstException.type && firstException.value) {
+      return `${firstException.type}: ${firstException.value}`;
+    }
+    return firstException.type || firstException.value || eventId || "<unknown>";
+  }
+  return eventId || "<unknown>";
+}
+function addExceptionTypeValue(event, value, type) {
+  const exception = event.exception = event.exception || {};
+  const values = exception.values = exception.values || [];
+  const firstException = values[0] = values[0] || {};
+  if (!firstException.value) {
+    firstException.value = value || "";
+  }
+  if (!firstException.type) {
+    firstException.type = type || "Error";
+  }
+}
+function addExceptionMechanism(event, newMechanism) {
+  const firstException = getFirstException(event);
+  if (!firstException) {
+    return;
+  }
+  const defaultMechanism = { type: "generic", handled: true };
+  const currentMechanism = firstException.mechanism;
+  firstException.mechanism = { ...defaultMechanism, ...currentMechanism, ...newMechanism };
+  if (newMechanism && "data" in newMechanism) {
+    const mergedData = { ...currentMechanism?.data, ...newMechanism.data };
+    firstException.mechanism.data = mergedData;
+  }
+}
+function checkOrSetAlreadyCaught(exception) {
+  if (isAlreadyCaptured(exception)) {
+    return true;
+  }
+  try {
+    addNonEnumerableProperty(exception, "__sentry_captured__", true);
+  } catch {
+  }
+  return false;
+}
+function isAlreadyCaptured(exception) {
+  try {
+    return exception.__sentry_captured__;
+  } catch {
+  }
+}
+
+// node_modules/@sentry/core/build/esm/utils/time.js
+var ONE_SECOND_IN_MS = 1e3;
+function dateTimestampInSeconds() {
+  return Date.now() / ONE_SECOND_IN_MS;
+}
+function createUnixTimestampInSecondsFunc() {
+  const { performance } = GLOBAL_OBJ;
+  if (!performance?.now || !performance.timeOrigin) {
+    return dateTimestampInSeconds;
+  }
+  const timeOrigin = performance.timeOrigin;
+  return () => {
+    return (timeOrigin + performance.now()) / ONE_SECOND_IN_MS;
+  };
+}
+var _cachedTimestampInSeconds;
+function timestampInSeconds() {
+  const func = _cachedTimestampInSeconds ?? (_cachedTimestampInSeconds = createUnixTimestampInSecondsFunc());
+  return func();
+}
+
+// node_modules/@sentry/core/build/esm/session.js
+function makeSession(context) {
+  const startingTime = timestampInSeconds();
+  const session = {
+    sid: uuid4(),
+    init: true,
+    timestamp: startingTime,
+    started: startingTime,
+    duration: 0,
+    status: "ok",
+    errors: 0,
+    ignoreDuration: false,
+    toJSON: () => sessionToJSON(session)
+  };
+  if (context) {
+    updateSession(session, context);
+  }
+  return session;
+}
+function updateSession(session, context = {}) {
+  if (context.user) {
+    if (!session.ipAddress && context.user.ip_address) {
+      session.ipAddress = context.user.ip_address;
+    }
+    if (!session.did && !context.did) {
+      session.did = context.user.id || context.user.email || context.user.username;
+    }
+  }
+  session.timestamp = context.timestamp || timestampInSeconds();
+  if (context.abnormal_mechanism) {
+    session.abnormal_mechanism = context.abnormal_mechanism;
+  }
+  if (context.ignoreDuration) {
+    session.ignoreDuration = context.ignoreDuration;
+  }
+  if (context.sid) {
+    session.sid = context.sid.length === 32 ? context.sid : uuid4();
+  }
+  if (context.init !== void 0) {
+    session.init = context.init;
+  }
+  if (!session.did && context.did) {
+    session.did = `${context.did}`;
+  }
+  if (typeof context.started === "number") {
+    session.started = context.started;
+  }
+  if (session.ignoreDuration) {
+    session.duration = void 0;
+  } else if (typeof context.duration === "number") {
+    session.duration = context.duration;
+  } else {
+    const duration = session.timestamp - session.started;
+    session.duration = duration >= 0 ? duration : 0;
+  }
+  if (context.release) {
+    session.release = context.release;
+  }
+  if (context.environment) {
+    session.environment = context.environment;
+  }
+  if (!session.ipAddress && context.ipAddress) {
+    session.ipAddress = context.ipAddress;
+  }
+  if (!session.userAgent && context.userAgent) {
+    session.userAgent = context.userAgent;
+  }
+  if (typeof context.errors === "number") {
+    session.errors = context.errors;
+  }
+  if (context.status) {
+    session.status = context.status;
+  }
+}
+function closeSession(session, status) {
+  let context = {};
+  if (status) {
+    context = { status };
+  } else if (session.status === "ok") {
+    context = { status: "exited" };
+  }
+  updateSession(session, context);
+}
+function sessionToJSON(session) {
+  return {
+    sid: `${session.sid}`,
+    init: session.init,
+    // Make sure that sec is converted to ms for date constructor
+    started: new Date(session.started * 1e3).toISOString(),
+    timestamp: new Date(session.timestamp * 1e3).toISOString(),
+    status: session.status,
+    errors: session.errors,
+    did: typeof session.did === "number" || typeof session.did === "string" ? `${session.did}` : void 0,
+    duration: session.duration,
+    abnormal_mechanism: session.abnormal_mechanism,
+    attrs: {
+      release: session.release,
+      environment: session.environment,
+      ip_address: session.ipAddress,
+      user_agent: session.userAgent
+    }
+  };
+}
+
+// node_modules/@sentry/core/build/esm/utils/merge.js
+function merge(initialObj, mergeObj, levels = 2) {
+  if (!mergeObj || typeof mergeObj !== "object" || levels <= 0) {
+    return mergeObj;
+  }
+  if (initialObj && Object.keys(mergeObj).length === 0) {
+    return initialObj;
+  }
+  const output = { ...initialObj };
+  for (const key in mergeObj) {
+    if (Object.prototype.hasOwnProperty.call(mergeObj, key)) {
+      output[key] = merge(output[key], mergeObj[key], levels - 1);
+    }
+  }
+  return output;
+}
+
+// node_modules/@sentry/core/build/esm/utils/propagationContext.js
+function generateTraceId() {
+  return uuid4();
+}
+function generateSpanId() {
+  return uuid4().substring(16);
+}
+
+// node_modules/@sentry/core/build/esm/utils/spanOnScope.js
+var SCOPE_SPAN_FIELD = "_sentrySpan";
+function _setSpanForScope(scope, span) {
+  if (span) {
+    addNonEnumerableProperty(scope, SCOPE_SPAN_FIELD, span);
+  } else {
+    delete scope[SCOPE_SPAN_FIELD];
+  }
+}
+function _getSpanForScope(scope) {
+  return scope[SCOPE_SPAN_FIELD];
+}
+
+// node_modules/@sentry/core/build/esm/scope.js
+var DEFAULT_MAX_BREADCRUMBS = 100;
+var Scope = class _Scope {
+  /** Flag if notifying is happening. */
+  /** Callback for client to receive scope changes. */
+  /** Callback list that will be called during event processing. */
+  /** Array of breadcrumbs. */
+  /** User */
+  /** Tags */
+  /** Extra */
+  /** Contexts */
+  /** Attachments */
+  /** Propagation Context for distributed tracing */
+  /**
+   * A place to stash data which is needed at some point in the SDK's event processing pipeline but which shouldn't get
+   * sent to Sentry
+   */
+  /** Fingerprint */
+  /** Severity */
+  /**
+   * Transaction Name
+   *
+   * IMPORTANT: The transaction name on the scope has nothing to do with root spans/transaction objects.
+   * It's purpose is to assign a transaction to the scope that's added to non-transaction events.
+   */
+  /** Session */
+  /** The client on this scope */
+  /** Contains the last event id of a captured event.  */
+  // NOTE: Any field which gets added here should get added not only to the constructor but also to the `clone` method.
+  constructor() {
+    this._notifyingListeners = false;
+    this._scopeListeners = [];
+    this._eventProcessors = [];
+    this._breadcrumbs = [];
+    this._attachments = [];
+    this._user = {};
+    this._tags = {};
+    this._extra = {};
+    this._contexts = {};
+    this._sdkProcessingMetadata = {};
+    this._propagationContext = {
+      traceId: generateTraceId(),
+      sampleRand: Math.random()
+    };
+  }
+  /**
+   * Clone all data from this scope into a new scope.
+   */
+  clone() {
+    const newScope = new _Scope();
+    newScope._breadcrumbs = [...this._breadcrumbs];
+    newScope._tags = { ...this._tags };
+    newScope._extra = { ...this._extra };
+    newScope._contexts = { ...this._contexts };
+    if (this._contexts.flags) {
+      newScope._contexts.flags = {
+        values: [...this._contexts.flags.values]
+      };
+    }
+    newScope._user = this._user;
+    newScope._level = this._level;
+    newScope._session = this._session;
+    newScope._transactionName = this._transactionName;
+    newScope._fingerprint = this._fingerprint;
+    newScope._eventProcessors = [...this._eventProcessors];
+    newScope._attachments = [...this._attachments];
+    newScope._sdkProcessingMetadata = { ...this._sdkProcessingMetadata };
+    newScope._propagationContext = { ...this._propagationContext };
+    newScope._client = this._client;
+    newScope._lastEventId = this._lastEventId;
+    _setSpanForScope(newScope, _getSpanForScope(this));
+    return newScope;
+  }
+  /**
+   * Update the client assigned to this scope.
+   * Note that not every scope will have a client assigned - isolation scopes & the global scope will generally not have a client,
+   * as well as manually created scopes.
+   */
+  setClient(client) {
+    this._client = client;
+  }
+  /**
+   * Set the ID of the last captured error event.
+   * This is generally only captured on the isolation scope.
+   */
+  setLastEventId(lastEventId2) {
+    this._lastEventId = lastEventId2;
+  }
+  /**
+   * Get the client assigned to this scope.
+   */
+  getClient() {
+    return this._client;
+  }
+  /**
+   * Get the ID of the last captured error event.
+   * This is generally only available on the isolation scope.
+   */
+  lastEventId() {
+    return this._lastEventId;
+  }
+  /**
+   * @inheritDoc
+   */
+  addScopeListener(callback) {
+    this._scopeListeners.push(callback);
+  }
+  /**
+   * Add an event processor that will be called before an event is sent.
+   */
+  addEventProcessor(callback) {
+    this._eventProcessors.push(callback);
+    return this;
+  }
+  /**
+   * Set the user for this scope.
+   * Set to `null` to unset the user.
+   */
+  setUser(user) {
+    this._user = user || {
+      email: void 0,
+      id: void 0,
+      ip_address: void 0,
+      username: void 0
+    };
+    if (this._session) {
+      updateSession(this._session, { user });
+    }
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Get the user from this scope.
+   */
+  getUser() {
+    return this._user;
+  }
+  /**
+   * Set an object that will be merged into existing tags on the scope,
+   * and will be sent as tags data with the event.
+   */
+  setTags(tags) {
+    this._tags = {
+      ...this._tags,
+      ...tags
+    };
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Set a single tag that will be sent as tags data with the event.
+   */
+  setTag(key, value) {
+    this._tags = { ...this._tags, [key]: value };
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Set an object that will be merged into existing extra on the scope,
+   * and will be sent as extra data with the event.
+   */
+  setExtras(extras) {
+    this._extra = {
+      ...this._extra,
+      ...extras
+    };
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Set a single key:value extra entry that will be sent as extra data with the event.
+   */
+  setExtra(key, extra) {
+    this._extra = { ...this._extra, [key]: extra };
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Sets the fingerprint on the scope to send with the events.
+   * @param {string[]} fingerprint Fingerprint to group events in Sentry.
+   */
+  setFingerprint(fingerprint) {
+    this._fingerprint = fingerprint;
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Sets the level on the scope for future events.
+   */
+  setLevel(level) {
+    this._level = level;
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Sets the transaction name on the scope so that the name of e.g. taken server route or
+   * the page location is attached to future events.
+   *
+   * IMPORTANT: Calling this function does NOT change the name of the currently active
+   * root span. If you want to change the name of the active root span, use
+   * `Sentry.updateSpanName(rootSpan, 'new name')` instead.
+   *
+   * By default, the SDK updates the scope's transaction name automatically on sensible
+   * occasions, such as a page navigation or when handling a new request on the server.
+   */
+  setTransactionName(name) {
+    this._transactionName = name;
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Sets context data with the given name.
+   * Data passed as context will be normalized. You can also pass `null` to unset the context.
+   * Note that context data will not be merged - calling `setContext` will overwrite an existing context with the same key.
+   */
+  setContext(key, context) {
+    if (context === null) {
+      delete this._contexts[key];
+    } else {
+      this._contexts[key] = context;
+    }
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Set the session for the scope.
+   */
+  setSession(session) {
+    if (!session) {
+      delete this._session;
+    } else {
+      this._session = session;
+    }
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Get the session from the scope.
+   */
+  getSession() {
+    return this._session;
+  }
+  /**
+   * Updates the scope with provided data. Can work in three variations:
+   * - plain object containing updatable attributes
+   * - Scope instance that'll extract the attributes from
+   * - callback function that'll receive the current scope as an argument and allow for modifications
+   */
+  update(captureContext) {
+    if (!captureContext) {
+      return this;
+    }
+    const scopeToMerge = typeof captureContext === "function" ? captureContext(this) : captureContext;
+    const scopeInstance = scopeToMerge instanceof _Scope ? scopeToMerge.getScopeData() : isPlainObject(scopeToMerge) ? captureContext : void 0;
+    const { tags, extra, user, contexts, level, fingerprint = [], propagationContext } = scopeInstance || {};
+    this._tags = { ...this._tags, ...tags };
+    this._extra = { ...this._extra, ...extra };
+    this._contexts = { ...this._contexts, ...contexts };
+    if (user && Object.keys(user).length) {
+      this._user = user;
+    }
+    if (level) {
+      this._level = level;
+    }
+    if (fingerprint.length) {
+      this._fingerprint = fingerprint;
+    }
+    if (propagationContext) {
+      this._propagationContext = propagationContext;
+    }
+    return this;
+  }
+  /**
+   * Clears the current scope and resets its properties.
+   * Note: The client will not be cleared.
+   */
+  clear() {
+    this._breadcrumbs = [];
+    this._tags = {};
+    this._extra = {};
+    this._user = {};
+    this._contexts = {};
+    this._level = void 0;
+    this._transactionName = void 0;
+    this._fingerprint = void 0;
+    this._session = void 0;
+    _setSpanForScope(this, void 0);
+    this._attachments = [];
+    this.setPropagationContext({ traceId: generateTraceId(), sampleRand: Math.random() });
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Adds a breadcrumb to the scope.
+   * By default, the last 100 breadcrumbs are kept.
+   */
+  addBreadcrumb(breadcrumb, maxBreadcrumbs) {
+    const maxCrumbs = typeof maxBreadcrumbs === "number" ? maxBreadcrumbs : DEFAULT_MAX_BREADCRUMBS;
+    if (maxCrumbs <= 0) {
+      return this;
+    }
+    const mergedBreadcrumb = {
+      timestamp: dateTimestampInSeconds(),
+      ...breadcrumb,
+      // Breadcrumb messages can theoretically be infinitely large and they're held in memory so we truncate them not to leak (too much) memory
+      message: breadcrumb.message ? truncate(breadcrumb.message, 2048) : breadcrumb.message
+    };
+    this._breadcrumbs.push(mergedBreadcrumb);
+    if (this._breadcrumbs.length > maxCrumbs) {
+      this._breadcrumbs = this._breadcrumbs.slice(-maxCrumbs);
+      this._client?.recordDroppedEvent("buffer_overflow", "log_item");
+    }
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Get the last breadcrumb of the scope.
+   */
+  getLastBreadcrumb() {
+    return this._breadcrumbs[this._breadcrumbs.length - 1];
+  }
+  /**
+   * Clear all breadcrumbs from the scope.
+   */
+  clearBreadcrumbs() {
+    this._breadcrumbs = [];
+    this._notifyScopeListeners();
+    return this;
+  }
+  /**
+   * Add an attachment to the scope.
+   */
+  addAttachment(attachment) {
+    this._attachments.push(attachment);
+    return this;
+  }
+  /**
+   * Clear all attachments from the scope.
+   */
+  clearAttachments() {
+    this._attachments = [];
+    return this;
+  }
+  /**
+   * Get the data of this scope, which should be applied to an event during processing.
+   */
+  getScopeData() {
+    return {
+      breadcrumbs: this._breadcrumbs,
+      attachments: this._attachments,
+      contexts: this._contexts,
+      tags: this._tags,
+      extra: this._extra,
+      user: this._user,
+      level: this._level,
+      fingerprint: this._fingerprint || [],
+      eventProcessors: this._eventProcessors,
+      propagationContext: this._propagationContext,
+      sdkProcessingMetadata: this._sdkProcessingMetadata,
+      transactionName: this._transactionName,
+      span: _getSpanForScope(this)
+    };
+  }
+  /**
+   * Add data which will be accessible during event processing but won't get sent to Sentry.
+   */
+  setSDKProcessingMetadata(newData) {
+    this._sdkProcessingMetadata = merge(this._sdkProcessingMetadata, newData, 2);
+    return this;
+  }
+  /**
+   * Add propagation context to the scope, used for distributed tracing
+   */
+  setPropagationContext(context) {
+    this._propagationContext = context;
+    return this;
+  }
+  /**
+   * Get propagation context from the scope, used for distributed tracing
+   */
+  getPropagationContext() {
+    return this._propagationContext;
+  }
+  /**
+   * Capture an exception for this scope.
+   *
+   * @returns {string} The id of the captured Sentry event.
+   */
+  captureException(exception, hint) {
+    const eventId = hint?.event_id || uuid4();
+    if (!this._client) {
+      DEBUG_BUILD && debug.warn("No client configured on scope - will not capture exception!");
+      return eventId;
+    }
+    const syntheticException = new Error("Sentry syntheticException");
+    this._client.captureException(
+      exception,
+      {
+        originalException: exception,
+        syntheticException,
+        ...hint,
+        event_id: eventId
+      },
+      this
+    );
+    return eventId;
+  }
+  /**
+   * Capture a message for this scope.
+   *
+   * @returns {string} The id of the captured message.
+   */
+  captureMessage(message, level, hint) {
+    const eventId = hint?.event_id || uuid4();
+    if (!this._client) {
+      DEBUG_BUILD && debug.warn("No client configured on scope - will not capture message!");
+      return eventId;
+    }
+    const syntheticException = new Error(message);
+    this._client.captureMessage(
+      message,
+      level,
+      {
+        originalException: message,
+        syntheticException,
+        ...hint,
+        event_id: eventId
+      },
+      this
+    );
+    return eventId;
+  }
+  /**
+   * Capture a Sentry event for this scope.
+   *
+   * @returns {string} The id of the captured event.
+   */
+  captureEvent(event, hint) {
+    const eventId = hint?.event_id || uuid4();
+    if (!this._client) {
+      DEBUG_BUILD && debug.warn("No client configured on scope - will not capture event!");
+      return eventId;
+    }
+    this._client.captureEvent(event, { ...hint, event_id: eventId }, this);
+    return eventId;
+  }
+  /**
+   * This will be called on every set call.
+   */
+  _notifyScopeListeners() {
+    if (!this._notifyingListeners) {
+      this._notifyingListeners = true;
+      this._scopeListeners.forEach((callback) => {
+        callback(this);
+      });
+      this._notifyingListeners = false;
+    }
+  }
+};
+
+// node_modules/@sentry/core/build/esm/defaultScopes.js
+function getDefaultCurrentScope() {
+  return getGlobalSingleton("defaultCurrentScope", () => new Scope());
+}
+function getDefaultIsolationScope() {
+  return getGlobalSingleton("defaultIsolationScope", () => new Scope());
+}
+
+// node_modules/@sentry/core/build/esm/asyncContext/stackStrategy.js
+var AsyncContextStack = class {
+  constructor(scope, isolationScope) {
+    let assignedScope;
+    if (!scope) {
+      assignedScope = new Scope();
+    } else {
+      assignedScope = scope;
+    }
+    let assignedIsolationScope;
+    if (!isolationScope) {
+      assignedIsolationScope = new Scope();
+    } else {
+      assignedIsolationScope = isolationScope;
+    }
+    this._stack = [{ scope: assignedScope }];
+    this._isolationScope = assignedIsolationScope;
+  }
+  /**
+   * Fork a scope for the stack.
+   */
+  withScope(callback) {
+    const scope = this._pushScope();
+    let maybePromiseResult;
+    try {
+      maybePromiseResult = callback(scope);
+    } catch (e) {
+      this._popScope();
+      throw e;
+    }
+    if (isThenable(maybePromiseResult)) {
+      return maybePromiseResult.then(
+        (res) => {
+          this._popScope();
+          return res;
+        },
+        (e) => {
+          this._popScope();
+          throw e;
+        }
+      );
+    }
+    this._popScope();
+    return maybePromiseResult;
+  }
+  /**
+   * Get the client of the stack.
+   */
+  getClient() {
+    return this.getStackTop().client;
+  }
+  /**
+   * Returns the scope of the top stack.
+   */
+  getScope() {
+    return this.getStackTop().scope;
+  }
+  /**
+   * Get the isolation scope for the stack.
+   */
+  getIsolationScope() {
+    return this._isolationScope;
+  }
+  /**
+   * Returns the topmost scope layer in the order domain > local > process.
+   */
+  getStackTop() {
+    return this._stack[this._stack.length - 1];
+  }
+  /**
+   * Push a scope to the stack.
+   */
+  _pushScope() {
+    const scope = this.getScope().clone();
+    this._stack.push({
+      client: this.getClient(),
+      scope
+    });
+    return scope;
+  }
+  /**
+   * Pop a scope from the stack.
+   */
+  _popScope() {
+    if (this._stack.length <= 1) return false;
+    return !!this._stack.pop();
+  }
+};
+function getAsyncContextStack() {
+  const registry = getMainCarrier();
+  const sentry = getSentryCarrier(registry);
+  return sentry.stack = sentry.stack || new AsyncContextStack(getDefaultCurrentScope(), getDefaultIsolationScope());
+}
+function withScope(callback) {
+  return getAsyncContextStack().withScope(callback);
+}
+function withSetScope(scope, callback) {
+  const stack = getAsyncContextStack();
+  return stack.withScope(() => {
+    stack.getStackTop().scope = scope;
+    return callback(scope);
+  });
+}
+function withIsolationScope(callback) {
+  return getAsyncContextStack().withScope(() => {
+    return callback(getAsyncContextStack().getIsolationScope());
+  });
+}
+function getStackAsyncContextStrategy() {
+  return {
+    withIsolationScope,
+    withScope,
+    withSetScope,
+    withSetIsolationScope: (_isolationScope, callback) => {
+      return withIsolationScope(callback);
+    },
+    getCurrentScope: () => getAsyncContextStack().getScope(),
+    getIsolationScope: () => getAsyncContextStack().getIsolationScope()
+  };
+}
+
+// node_modules/@sentry/core/build/esm/asyncContext/index.js
+function getAsyncContextStrategy(carrier) {
+  const sentry = getSentryCarrier(carrier);
+  if (sentry.acs) {
+    return sentry.acs;
+  }
+  return getStackAsyncContextStrategy();
+}
+
+// node_modules/@sentry/core/build/esm/currentScopes.js
+function getCurrentScope() {
+  const carrier = getMainCarrier();
+  const acs = getAsyncContextStrategy(carrier);
+  return acs.getCurrentScope();
+}
+function getIsolationScope() {
+  const carrier = getMainCarrier();
+  const acs = getAsyncContextStrategy(carrier);
+  return acs.getIsolationScope();
+}
+function getGlobalScope() {
+  return getGlobalSingleton("globalScope", () => new Scope());
+}
+function withScope2(...rest) {
+  const carrier = getMainCarrier();
+  const acs = getAsyncContextStrategy(carrier);
+  if (rest.length === 2) {
+    const [scope, callback] = rest;
+    if (!scope) {
+      return acs.withScope(callback);
+    }
+    return acs.withSetScope(scope, callback);
+  }
+  return acs.withScope(rest[0]);
+}
+function getClient() {
+  return getCurrentScope().getClient();
+}
+function getTraceContextFromScope(scope) {
+  const propagationContext = scope.getPropagationContext();
+  const { traceId, parentSpanId, propagationSpanId } = propagationContext;
+  const traceContext = {
+    trace_id: traceId,
+    span_id: propagationSpanId || generateSpanId()
+  };
+  if (parentSpanId) {
+    traceContext.parent_span_id = parentSpanId;
+  }
+  return traceContext;
+}
+
+// node_modules/@sentry/core/build/esm/semanticAttributes.js
+var SEMANTIC_ATTRIBUTE_SENTRY_SOURCE = "sentry.source";
+var SEMANTIC_ATTRIBUTE_SENTRY_SAMPLE_RATE = "sentry.sample_rate";
+var SEMANTIC_ATTRIBUTE_SENTRY_PREVIOUS_TRACE_SAMPLE_RATE = "sentry.previous_trace_sample_rate";
+var SEMANTIC_ATTRIBUTE_SENTRY_OP = "sentry.op";
+var SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN = "sentry.origin";
+var SEMANTIC_ATTRIBUTE_PROFILE_ID = "sentry.profile_id";
+var SEMANTIC_ATTRIBUTE_EXCLUSIVE_TIME = "sentry.exclusive_time";
+
+// node_modules/@sentry/core/build/esm/tracing/spanstatus.js
+var SPAN_STATUS_UNSET = 0;
+var SPAN_STATUS_OK = 1;
+
+// node_modules/@sentry/core/build/esm/tracing/utils.js
+var SCOPE_ON_START_SPAN_FIELD = "_sentryScope";
+var ISOLATION_SCOPE_ON_START_SPAN_FIELD = "_sentryIsolationScope";
+function getCapturedScopesOnSpan(span) {
+  return {
+    scope: span[SCOPE_ON_START_SPAN_FIELD],
+    isolationScope: span[ISOLATION_SCOPE_ON_START_SPAN_FIELD]
+  };
+}
+
+// node_modules/@sentry/core/build/esm/utils/baggage.js
+var SENTRY_BAGGAGE_KEY_PREFIX = "sentry-";
+var SENTRY_BAGGAGE_KEY_PREFIX_REGEX = /^sentry-/;
+function baggageHeaderToDynamicSamplingContext(baggageHeader) {
+  const baggageObject = parseBaggageHeader(baggageHeader);
+  if (!baggageObject) {
+    return void 0;
+  }
+  const dynamicSamplingContext = Object.entries(baggageObject).reduce((acc, [key, value]) => {
+    if (key.match(SENTRY_BAGGAGE_KEY_PREFIX_REGEX)) {
+      const nonPrefixedKey = key.slice(SENTRY_BAGGAGE_KEY_PREFIX.length);
+      acc[nonPrefixedKey] = value;
+    }
+    return acc;
+  }, {});
+  if (Object.keys(dynamicSamplingContext).length > 0) {
+    return dynamicSamplingContext;
+  } else {
+    return void 0;
+  }
+}
+function parseBaggageHeader(baggageHeader) {
+  if (!baggageHeader || !isString(baggageHeader) && !Array.isArray(baggageHeader)) {
+    return void 0;
+  }
+  if (Array.isArray(baggageHeader)) {
+    return baggageHeader.reduce((acc, curr) => {
+      const currBaggageObject = baggageHeaderToObject(curr);
+      Object.entries(currBaggageObject).forEach(([key, value]) => {
+        acc[key] = value;
+      });
+      return acc;
+    }, {});
+  }
+  return baggageHeaderToObject(baggageHeader);
+}
+function baggageHeaderToObject(baggageHeader) {
+  return baggageHeader.split(",").map(
+    (baggageEntry) => baggageEntry.split("=").map((keyOrValue) => {
+      try {
+        return decodeURIComponent(keyOrValue.trim());
+      } catch {
+        return;
+      }
+    })
+  ).reduce((acc, [key, value]) => {
+    if (key && value) {
+      acc[key] = value;
+    }
+    return acc;
+  }, {});
+}
+
+// node_modules/@sentry/core/build/esm/utils/parseSampleRate.js
+function parseSampleRate(sampleRate) {
+  if (typeof sampleRate === "boolean") {
+    return Number(sampleRate);
+  }
+  const rate = typeof sampleRate === "string" ? parseFloat(sampleRate) : sampleRate;
+  if (typeof rate !== "number" || isNaN(rate) || rate < 0 || rate > 1) {
+    return void 0;
+  }
+  return rate;
+}
+
+// node_modules/@sentry/core/build/esm/utils/spanUtils.js
+var TRACE_FLAG_SAMPLED = 1;
+var hasShownSpanDropWarning = false;
+function spanToTraceContext(span) {
+  const { spanId, traceId: trace_id, isRemote } = span.spanContext();
+  const parent_span_id = isRemote ? spanId : spanToJSON(span).parent_span_id;
+  const scope = getCapturedScopesOnSpan(span).scope;
+  const span_id = isRemote ? scope?.getPropagationContext().propagationSpanId || generateSpanId() : spanId;
+  return {
+    parent_span_id,
+    span_id,
+    trace_id
+  };
+}
+function convertSpanLinksForEnvelope(links) {
+  if (links && links.length > 0) {
+    return links.map(({ context: { spanId, traceId, traceFlags, ...restContext }, attributes }) => ({
+      span_id: spanId,
+      trace_id: traceId,
+      sampled: traceFlags === TRACE_FLAG_SAMPLED,
+      attributes,
+      ...restContext
+    }));
+  } else {
+    return void 0;
+  }
+}
+function spanTimeInputToSeconds(input) {
+  if (typeof input === "number") {
+    return ensureTimestampInSeconds(input);
+  }
+  if (Array.isArray(input)) {
+    return input[0] + input[1] / 1e9;
+  }
+  if (input instanceof Date) {
+    return ensureTimestampInSeconds(input.getTime());
+  }
+  return timestampInSeconds();
+}
+function ensureTimestampInSeconds(timestamp) {
+  const isMs = timestamp > 9999999999;
+  return isMs ? timestamp / 1e3 : timestamp;
+}
+function spanToJSON(span) {
+  if (spanIsSentrySpan(span)) {
+    return span.getSpanJSON();
+  }
+  const { spanId: span_id, traceId: trace_id } = span.spanContext();
+  if (spanIsOpenTelemetrySdkTraceBaseSpan(span)) {
+    const { attributes, startTime, name, endTime, status, links } = span;
+    const parentSpanId = "parentSpanId" in span ? span.parentSpanId : "parentSpanContext" in span ? span.parentSpanContext?.spanId : void 0;
+    return {
+      span_id,
+      trace_id,
+      data: attributes,
+      description: name,
+      parent_span_id: parentSpanId,
+      start_timestamp: spanTimeInputToSeconds(startTime),
+      // This is [0,0] by default in OTEL, in which case we want to interpret this as no end time
+      timestamp: spanTimeInputToSeconds(endTime) || void 0,
+      status: getStatusMessage(status),
+      op: attributes[SEMANTIC_ATTRIBUTE_SENTRY_OP],
+      origin: attributes[SEMANTIC_ATTRIBUTE_SENTRY_ORIGIN],
+      links: convertSpanLinksForEnvelope(links)
+    };
+  }
+  return {
+    span_id,
+    trace_id,
+    start_timestamp: 0,
+    data: {}
+  };
+}
+function spanIsOpenTelemetrySdkTraceBaseSpan(span) {
+  const castSpan = span;
+  return !!castSpan.attributes && !!castSpan.startTime && !!castSpan.name && !!castSpan.endTime && !!castSpan.status;
+}
+function spanIsSentrySpan(span) {
+  return typeof span.getSpanJSON === "function";
+}
+function spanIsSampled(span) {
+  const { traceFlags } = span.spanContext();
+  return traceFlags === TRACE_FLAG_SAMPLED;
+}
+function getStatusMessage(status) {
+  if (!status || status.code === SPAN_STATUS_UNSET) {
+    return void 0;
+  }
+  if (status.code === SPAN_STATUS_OK) {
+    return "ok";
+  }
+  return status.message || "unknown_error";
+}
+var ROOT_SPAN_FIELD = "_sentryRootSpan";
+function getRootSpan(span) {
+  return span[ROOT_SPAN_FIELD] || span;
+}
+function showSpanDropWarning() {
+  if (!hasShownSpanDropWarning) {
+    consoleSandbox(() => {
+      console.warn(
+        "[Sentry] Returning null from `beforeSendSpan` is disallowed. To drop certain spans, configure the respective integrations directly."
+      );
+    });
+    hasShownSpanDropWarning = true;
+  }
+}
+
+// node_modules/@sentry/core/build/esm/utils/hasSpansEnabled.js
+function hasSpansEnabled(maybeOptions) {
+  if (typeof __SENTRY_TRACING__ === "boolean" && !__SENTRY_TRACING__) {
+    return false;
+  }
+  const options = maybeOptions || getClient()?.getOptions();
+  return !!options && // Note: This check is `!= null`, meaning "nullish". `0` is not "nullish", `undefined` and `null` are. (This comment was brought to you by 15 minutes of questioning life)
+  (options.tracesSampleRate != null || !!options.tracesSampler);
+}
+
+// node_modules/@sentry/core/build/esm/constants.js
+var DEFAULT_ENVIRONMENT = "production";
+
+// node_modules/@sentry/core/build/esm/utils/dsn.js
+var ORG_ID_REGEX = /^o(\d+)\./;
+var DSN_REGEX = /^(?:(\w+):)\/\/(?:(\w+)(?::(\w+)?)?@)([\w.-]+)(?::(\d+))?\/(.+)/;
+function isValidProtocol(protocol) {
+  return protocol === "http" || protocol === "https";
+}
+function dsnToString(dsn, withPassword = false) {
+  const { host, path, pass, port, projectId, protocol, publicKey } = dsn;
+  return `${protocol}://${publicKey}${withPassword && pass ? `:${pass}` : ""}@${host}${port ? `:${port}` : ""}/${path ? `${path}/` : path}${projectId}`;
+}
+function dsnFromString(str) {
+  const match = DSN_REGEX.exec(str);
+  if (!match) {
+    consoleSandbox(() => {
+      console.error(`Invalid Sentry Dsn: ${str}`);
+    });
+    return void 0;
+  }
+  const [protocol, publicKey, pass = "", host = "", port = "", lastPath = ""] = match.slice(1);
+  let path = "";
+  let projectId = lastPath;
+  const split = projectId.split("/");
+  if (split.length > 1) {
+    path = split.slice(0, -1).join("/");
+    projectId = split.pop();
+  }
+  if (projectId) {
+    const projectMatch = projectId.match(/^\d+/);
+    if (projectMatch) {
+      projectId = projectMatch[0];
+    }
+  }
+  return dsnFromComponents({ host, pass, path, projectId, port, protocol, publicKey });
+}
+function dsnFromComponents(components) {
+  return {
+    protocol: components.protocol,
+    publicKey: components.publicKey || "",
+    pass: components.pass || "",
+    host: components.host,
+    port: components.port || "",
+    path: components.path || "",
+    projectId: components.projectId
+  };
+}
+function validateDsn(dsn) {
+  if (!DEBUG_BUILD) {
+    return true;
+  }
+  const { port, projectId, protocol } = dsn;
+  const requiredComponents = ["protocol", "publicKey", "host", "projectId"];
+  const hasMissingRequiredComponent = requiredComponents.find((component) => {
+    if (!dsn[component]) {
+      debug.error(`Invalid Sentry Dsn: ${component} missing`);
+      return true;
+    }
+    return false;
+  });
+  if (hasMissingRequiredComponent) {
+    return false;
+  }
+  if (!projectId.match(/^\d+$/)) {
+    debug.error(`Invalid Sentry Dsn: Invalid projectId ${projectId}`);
+    return false;
+  }
+  if (!isValidProtocol(protocol)) {
+    debug.error(`Invalid Sentry Dsn: Invalid protocol ${protocol}`);
+    return false;
+  }
+  if (port && isNaN(parseInt(port, 10))) {
+    debug.error(`Invalid Sentry Dsn: Invalid port ${port}`);
+    return false;
+  }
+  return true;
+}
+function extractOrgIdFromDsnHost(host) {
+  const match = host.match(ORG_ID_REGEX);
+  return match?.[1];
+}
+function makeDsn(from) {
+  const components = typeof from === "string" ? dsnFromString(from) : dsnFromComponents(from);
+  if (!components || !validateDsn(components)) {
+    return void 0;
+  }
+  return components;
+}
+
+// node_modules/@sentry/core/build/esm/tracing/dynamicSamplingContext.js
+var FROZEN_DSC_FIELD = "_frozenDsc";
+function getDynamicSamplingContextFromClient(trace_id, client) {
+  const options = client.getOptions();
+  const { publicKey: public_key, host } = client.getDsn() || {};
+  let org_id;
+  if (options.orgId) {
+    org_id = String(options.orgId);
+  } else if (host) {
+    org_id = extractOrgIdFromDsnHost(host);
+  }
+  const dsc = {
+    environment: options.environment || DEFAULT_ENVIRONMENT,
+    release: options.release,
+    public_key,
+    trace_id,
+    org_id
+  };
+  client.emit("createDsc", dsc);
+  return dsc;
+}
+function getDynamicSamplingContextFromScope(client, scope) {
+  const propagationContext = scope.getPropagationContext();
+  return propagationContext.dsc || getDynamicSamplingContextFromClient(propagationContext.traceId, client);
+}
+function getDynamicSamplingContextFromSpan(span) {
+  const client = getClient();
+  if (!client) {
+    return {};
+  }
+  const rootSpan = getRootSpan(span);
+  const rootSpanJson = spanToJSON(rootSpan);
+  const rootSpanAttributes = rootSpanJson.data;
+  const traceState = rootSpan.spanContext().traceState;
+  const rootSpanSampleRate = traceState?.get("sentry.sample_rate") ?? rootSpanAttributes[SEMANTIC_ATTRIBUTE_SENTRY_SAMPLE_RATE] ?? rootSpanAttributes[SEMANTIC_ATTRIBUTE_SENTRY_PREVIOUS_TRACE_SAMPLE_RATE];
+  function applyLocalSampleRateToDsc(dsc2) {
+    if (typeof rootSpanSampleRate === "number" || typeof rootSpanSampleRate === "string") {
+      dsc2.sample_rate = `${rootSpanSampleRate}`;
+    }
+    return dsc2;
+  }
+  const frozenDsc = rootSpan[FROZEN_DSC_FIELD];
+  if (frozenDsc) {
+    return applyLocalSampleRateToDsc(frozenDsc);
+  }
+  const traceStateDsc = traceState?.get("sentry.dsc");
+  const dscOnTraceState = traceStateDsc && baggageHeaderToDynamicSamplingContext(traceStateDsc);
+  if (dscOnTraceState) {
+    return applyLocalSampleRateToDsc(dscOnTraceState);
+  }
+  const dsc = getDynamicSamplingContextFromClient(span.spanContext().traceId, client);
+  const source = rootSpanAttributes[SEMANTIC_ATTRIBUTE_SENTRY_SOURCE];
+  const name = rootSpanJson.description;
+  if (source !== "url" && name) {
+    dsc.transaction = name;
+  }
+  if (hasSpansEnabled()) {
+    dsc.sampled = String(spanIsSampled(rootSpan));
+    dsc.sample_rand = // In OTEL we store the sample rand on the trace state because we cannot access scopes for NonRecordingSpans
+    // The Sentry OTEL SpanSampler takes care of writing the sample rand on the root span
+    traceState?.get("sentry.sample_rand") ?? // On all other platforms we can actually get the scopes from a root span (we use this as a fallback)
+    getCapturedScopesOnSpan(rootSpan).scope?.getPropagationContext().sampleRand.toString();
+  }
+  applyLocalSampleRateToDsc(dsc);
+  client.emit("createDsc", dsc, rootSpan);
+  return dsc;
+}
+
+// node_modules/@sentry/core/build/esm/utils/normalize.js
+function normalize(input, depth = 100, maxProperties = Infinity) {
+  try {
+    return visit("", input, depth, maxProperties);
+  } catch (err) {
+    return { ERROR: `**non-serializable** (${err})` };
+  }
+}
+function normalizeToSize(object, depth = 3, maxSize = 100 * 1024) {
+  const normalized = normalize(object, depth);
+  if (jsonSize(normalized) > maxSize) {
+    return normalizeToSize(object, depth - 1, maxSize);
+  }
+  return normalized;
+}
+function visit(key, value, depth = Infinity, maxProperties = Infinity, memo = memoBuilder()) {
+  const [memoize, unmemoize] = memo;
+  if (value == null || // this matches null and undefined -> eqeq not eqeqeq
+  ["boolean", "string"].includes(typeof value) || typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  const stringified = stringifyValue(key, value);
+  if (!stringified.startsWith("[object ")) {
+    return stringified;
+  }
+  if (value["__sentry_skip_normalization__"]) {
+    return value;
+  }
+  const remainingDepth = typeof value["__sentry_override_normalization_depth__"] === "number" ? value["__sentry_override_normalization_depth__"] : depth;
+  if (remainingDepth === 0) {
+    return stringified.replace("object ", "");
+  }
+  if (memoize(value)) {
+    return "[Circular ~]";
+  }
+  const valueWithToJSON = value;
+  if (valueWithToJSON && typeof valueWithToJSON.toJSON === "function") {
+    try {
+      const jsonValue = valueWithToJSON.toJSON();
+      return visit("", jsonValue, remainingDepth - 1, maxProperties, memo);
+    } catch {
+    }
+  }
+  const normalized = Array.isArray(value) ? [] : {};
+  let numAdded = 0;
+  const visitable = convertToPlainObject(value);
+  for (const visitKey in visitable) {
+    if (!Object.prototype.hasOwnProperty.call(visitable, visitKey)) {
+      continue;
+    }
+    if (numAdded >= maxProperties) {
+      normalized[visitKey] = "[MaxProperties ~]";
+      break;
+    }
+    const visitValue = visitable[visitKey];
+    normalized[visitKey] = visit(visitKey, visitValue, remainingDepth - 1, maxProperties, memo);
+    numAdded++;
+  }
+  unmemoize(value);
+  return normalized;
+}
+function stringifyValue(key, value) {
+  try {
+    if (key === "domain" && value && typeof value === "object" && value._events) {
+      return "[Domain]";
+    }
+    if (key === "domainEmitter") {
+      return "[DomainEmitter]";
+    }
+    if (typeof global !== "undefined" && value === global) {
+      return "[Global]";
+    }
+    if (typeof window !== "undefined" && value === window) {
+      return "[Window]";
+    }
+    if (typeof document !== "undefined" && value === document) {
+      return "[Document]";
+    }
+    if (isVueViewModel(value)) {
+      return "[VueViewModel]";
+    }
+    if (isSyntheticEvent(value)) {
+      return "[SyntheticEvent]";
+    }
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      return `[${value}]`;
+    }
+    if (typeof value === "function") {
+      return `[Function: ${getFunctionName(value)}]`;
+    }
+    if (typeof value === "symbol") {
+      return `[${String(value)}]`;
+    }
+    if (typeof value === "bigint") {
+      return `[BigInt: ${String(value)}]`;
+    }
+    const objName = getConstructorName(value);
+    if (/^HTML(\w*)Element$/.test(objName)) {
+      return `[HTMLElement: ${objName}]`;
+    }
+    return `[object ${objName}]`;
+  } catch (err) {
+    return `**non-serializable** (${err})`;
+  }
+}
+function getConstructorName(value) {
+  const prototype3 = Object.getPrototypeOf(value);
+  return prototype3?.constructor ? prototype3.constructor.name : "null prototype";
+}
+function utf8Length(value) {
+  return ~-encodeURI(value).split(/%..|./).length;
+}
+function jsonSize(value) {
+  return utf8Length(JSON.stringify(value));
+}
+function memoBuilder() {
+  const inner = /* @__PURE__ */ new WeakSet();
+  function memoize(obj) {
+    if (inner.has(obj)) {
+      return true;
+    }
+    inner.add(obj);
+    return false;
+  }
+  function unmemoize(obj) {
+    inner.delete(obj);
+  }
+  return [memoize, unmemoize];
+}
+
+// node_modules/@sentry/core/build/esm/utils/envelope.js
+function createEnvelope(headers, items = []) {
+  return [headers, items];
+}
+function addItemToEnvelope(envelope, newItem) {
+  const [headers, items] = envelope;
+  return [headers, [...items, newItem]];
+}
+function forEachEnvelopeItem(envelope, callback) {
+  const envelopeItems = envelope[1];
+  for (const envelopeItem of envelopeItems) {
+    const envelopeItemType = envelopeItem[0].type;
+    const result = callback(envelopeItem, envelopeItemType);
+    if (result) {
+      return true;
+    }
+  }
+  return false;
+}
+function encodeUTF8(input) {
+  const carrier = getSentryCarrier(GLOBAL_OBJ);
+  return carrier.encodePolyfill ? carrier.encodePolyfill(input) : new TextEncoder().encode(input);
+}
+function serializeEnvelope(envelope) {
+  const [envHeaders, items] = envelope;
+  let parts = JSON.stringify(envHeaders);
+  function append2(next) {
+    if (typeof parts === "string") {
+      parts = typeof next === "string" ? parts + next : [encodeUTF8(parts), next];
+    } else {
+      parts.push(typeof next === "string" ? encodeUTF8(next) : next);
+    }
+  }
+  for (const item of items) {
+    const [itemHeaders, payload] = item;
+    append2(`
+${JSON.stringify(itemHeaders)}
+`);
+    if (typeof payload === "string" || payload instanceof Uint8Array) {
+      append2(payload);
+    } else {
+      let stringifiedPayload;
+      try {
+        stringifiedPayload = JSON.stringify(payload);
+      } catch {
+        stringifiedPayload = JSON.stringify(normalize(payload));
+      }
+      append2(stringifiedPayload);
+    }
+  }
+  return typeof parts === "string" ? parts : concatBuffers(parts);
+}
+function concatBuffers(buffers) {
+  const totalLength = buffers.reduce((acc, buf) => acc + buf.length, 0);
+  const merged = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const buffer of buffers) {
+    merged.set(buffer, offset);
+    offset += buffer.length;
+  }
+  return merged;
+}
+function createAttachmentEnvelopeItem(attachment) {
+  const buffer = typeof attachment.data === "string" ? encodeUTF8(attachment.data) : attachment.data;
+  return [
+    {
+      type: "attachment",
+      length: buffer.length,
+      filename: attachment.filename,
+      content_type: attachment.contentType,
+      attachment_type: attachment.attachmentType
+    },
+    buffer
+  ];
+}
+var ITEM_TYPE_TO_DATA_CATEGORY_MAP = {
+  session: "session",
+  sessions: "session",
+  attachment: "attachment",
+  transaction: "transaction",
+  event: "error",
+  client_report: "internal",
+  user_report: "default",
+  profile: "profile",
+  profile_chunk: "profile",
+  replay_event: "replay",
+  replay_recording: "replay",
+  check_in: "monitor",
+  feedback: "feedback",
+  span: "span",
+  raw_security: "security",
+  log: "log_item"
+};
+function envelopeItemTypeToDataCategory(type) {
+  return ITEM_TYPE_TO_DATA_CATEGORY_MAP[type];
+}
+function getSdkMetadataForEnvelopeHeader(metadataOrEvent) {
+  if (!metadataOrEvent?.sdk) {
+    return;
+  }
+  const { name, version: version3 } = metadataOrEvent.sdk;
+  return { name, version: version3 };
+}
+function createEventEnvelopeHeaders(event, sdkInfo, tunnel, dsn) {
+  const dynamicSamplingContext = event.sdkProcessingMetadata?.dynamicSamplingContext;
+  return {
+    event_id: event.event_id,
+    sent_at: (/* @__PURE__ */ new Date()).toISOString(),
+    ...sdkInfo && { sdk: sdkInfo },
+    ...!!tunnel && dsn && { dsn: dsnToString(dsn) },
+    ...dynamicSamplingContext && {
+      trace: dynamicSamplingContext
+    }
+  };
+}
+
+// node_modules/@sentry/core/build/esm/envelope.js
+function enhanceEventWithSdkInfo(event, sdkInfo) {
+  if (!sdkInfo) {
+    return event;
+  }
+  event.sdk = event.sdk || {};
+  event.sdk.name = event.sdk.name || sdkInfo.name;
+  event.sdk.version = event.sdk.version || sdkInfo.version;
+  event.sdk.integrations = [...event.sdk.integrations || [], ...sdkInfo.integrations || []];
+  event.sdk.packages = [...event.sdk.packages || [], ...sdkInfo.packages || []];
+  return event;
+}
+function createSessionEnvelope(session, dsn, metadata, tunnel) {
+  const sdkInfo = getSdkMetadataForEnvelopeHeader(metadata);
+  const envelopeHeaders = {
+    sent_at: (/* @__PURE__ */ new Date()).toISOString(),
+    ...sdkInfo && { sdk: sdkInfo },
+    ...!!tunnel && dsn && { dsn: dsnToString(dsn) }
+  };
+  const envelopeItem = "aggregates" in session ? [{ type: "sessions" }, session] : [{ type: "session" }, session.toJSON()];
+  return createEnvelope(envelopeHeaders, [envelopeItem]);
+}
+function createEventEnvelope(event, dsn, metadata, tunnel) {
+  const sdkInfo = getSdkMetadataForEnvelopeHeader(metadata);
+  const eventType = event.type && event.type !== "replay_event" ? event.type : "event";
+  enhanceEventWithSdkInfo(event, metadata?.sdk);
+  const envelopeHeaders = createEventEnvelopeHeaders(event, sdkInfo, tunnel, dsn);
+  delete event.sdkProcessingMetadata;
+  const eventItem = [{ type: eventType }, event];
+  return createEnvelope(envelopeHeaders, [eventItem]);
+}
+
+// node_modules/@sentry/core/build/esm/utils/syncpromise.js
+var STATE_PENDING = 0;
+var STATE_RESOLVED = 1;
+var STATE_REJECTED = 2;
+function resolvedSyncPromise(value) {
+  return new SyncPromise((resolve) => {
+    resolve(value);
+  });
+}
+function rejectedSyncPromise(reason) {
+  return new SyncPromise((_, reject) => {
+    reject(reason);
+  });
+}
+var SyncPromise = class _SyncPromise {
+  constructor(executor) {
+    this._state = STATE_PENDING;
+    this._handlers = [];
+    this._runExecutor(executor);
+  }
+  /** @inheritdoc */
+  then(onfulfilled, onrejected) {
+    return new _SyncPromise((resolve, reject) => {
+      this._handlers.push([
+        false,
+        (result) => {
+          if (!onfulfilled) {
+            resolve(result);
+          } else {
+            try {
+              resolve(onfulfilled(result));
+            } catch (e) {
+              reject(e);
+            }
+          }
+        },
+        (reason) => {
+          if (!onrejected) {
+            reject(reason);
+          } else {
+            try {
+              resolve(onrejected(reason));
+            } catch (e) {
+              reject(e);
+            }
+          }
+        }
+      ]);
+      this._executeHandlers();
+    });
+  }
+  /** @inheritdoc */
+  catch(onrejected) {
+    return this.then((val) => val, onrejected);
+  }
+  /** @inheritdoc */
+  finally(onfinally) {
+    return new _SyncPromise((resolve, reject) => {
+      let val;
+      let isRejected;
+      return this.then(
+        (value) => {
+          isRejected = false;
+          val = value;
+          if (onfinally) {
+            onfinally();
+          }
+        },
+        (reason) => {
+          isRejected = true;
+          val = reason;
+          if (onfinally) {
+            onfinally();
+          }
+        }
+      ).then(() => {
+        if (isRejected) {
+          reject(val);
+          return;
+        }
+        resolve(val);
+      });
+    });
+  }
+  /** Excute the resolve/reject handlers. */
+  _executeHandlers() {
+    if (this._state === STATE_PENDING) {
+      return;
+    }
+    const cachedHandlers = this._handlers.slice();
+    this._handlers = [];
+    cachedHandlers.forEach((handler) => {
+      if (handler[0]) {
+        return;
+      }
+      if (this._state === STATE_RESOLVED) {
+        handler[1](this._value);
+      }
+      if (this._state === STATE_REJECTED) {
+        handler[2](this._value);
+      }
+      handler[0] = true;
+    });
+  }
+  /** Run the executor for the SyncPromise. */
+  _runExecutor(executor) {
+    const setResult = (state, value) => {
+      if (this._state !== STATE_PENDING) {
+        return;
+      }
+      if (isThenable(value)) {
+        void value.then(resolve, reject);
+        return;
+      }
+      this._state = state;
+      this._value = value;
+      this._executeHandlers();
+    };
+    const resolve = (value) => {
+      setResult(STATE_RESOLVED, value);
+    };
+    const reject = (reason) => {
+      setResult(STATE_REJECTED, reason);
+    };
+    try {
+      executor(resolve, reject);
+    } catch (e) {
+      reject(e);
+    }
+  }
+};
+
+// node_modules/@sentry/core/build/esm/eventProcessors.js
+function notifyEventProcessors(processors, event, hint, index = 0) {
+  return new SyncPromise((resolve, reject) => {
+    const processor = processors[index];
+    if (event === null || typeof processor !== "function") {
+      resolve(event);
+    } else {
+      const result = processor({ ...event }, hint);
+      DEBUG_BUILD && processor.id && result === null && debug.log(`Event processor "${processor.id}" dropped event`);
+      if (isThenable(result)) {
+        void result.then((final) => notifyEventProcessors(processors, final, hint, index + 1).then(resolve)).then(null, reject);
+      } else {
+        void notifyEventProcessors(processors, result, hint, index + 1).then(resolve).then(null, reject);
+      }
+    }
+  });
+}
+
+// node_modules/@sentry/core/build/esm/utils/applyScopeDataToEvent.js
+function applyScopeDataToEvent(event, data) {
+  const { fingerprint, span, breadcrumbs, sdkProcessingMetadata } = data;
+  applyDataToEvent(event, data);
+  if (span) {
+    applySpanToEvent(event, span);
+  }
+  applyFingerprintToEvent(event, fingerprint);
+  applyBreadcrumbsToEvent(event, breadcrumbs);
+  applySdkMetadataToEvent(event, sdkProcessingMetadata);
+}
+function mergeScopeData(data, mergeData) {
+  const {
+    extra,
+    tags,
+    user,
+    contexts,
+    level,
+    sdkProcessingMetadata,
+    breadcrumbs,
+    fingerprint,
+    eventProcessors,
+    attachments,
+    propagationContext,
+    transactionName,
+    span
+  } = mergeData;
+  mergeAndOverwriteScopeData(data, "extra", extra);
+  mergeAndOverwriteScopeData(data, "tags", tags);
+  mergeAndOverwriteScopeData(data, "user", user);
+  mergeAndOverwriteScopeData(data, "contexts", contexts);
+  data.sdkProcessingMetadata = merge(data.sdkProcessingMetadata, sdkProcessingMetadata, 2);
+  if (level) {
+    data.level = level;
+  }
+  if (transactionName) {
+    data.transactionName = transactionName;
+  }
+  if (span) {
+    data.span = span;
+  }
+  if (breadcrumbs.length) {
+    data.breadcrumbs = [...data.breadcrumbs, ...breadcrumbs];
+  }
+  if (fingerprint.length) {
+    data.fingerprint = [...data.fingerprint, ...fingerprint];
+  }
+  if (eventProcessors.length) {
+    data.eventProcessors = [...data.eventProcessors, ...eventProcessors];
+  }
+  if (attachments.length) {
+    data.attachments = [...data.attachments, ...attachments];
+  }
+  data.propagationContext = { ...data.propagationContext, ...propagationContext };
+}
+function mergeAndOverwriteScopeData(data, prop, mergeVal) {
+  data[prop] = merge(data[prop], mergeVal, 1);
+}
+function applyDataToEvent(event, data) {
+  const { extra, tags, user, contexts, level, transactionName } = data;
+  if (Object.keys(extra).length) {
+    event.extra = { ...extra, ...event.extra };
+  }
+  if (Object.keys(tags).length) {
+    event.tags = { ...tags, ...event.tags };
+  }
+  if (Object.keys(user).length) {
+    event.user = { ...user, ...event.user };
+  }
+  if (Object.keys(contexts).length) {
+    event.contexts = { ...contexts, ...event.contexts };
+  }
+  if (level) {
+    event.level = level;
+  }
+  if (transactionName && event.type !== "transaction") {
+    event.transaction = transactionName;
+  }
+}
+function applyBreadcrumbsToEvent(event, breadcrumbs) {
+  const mergedBreadcrumbs = [...event.breadcrumbs || [], ...breadcrumbs];
+  event.breadcrumbs = mergedBreadcrumbs.length ? mergedBreadcrumbs : void 0;
+}
+function applySdkMetadataToEvent(event, sdkProcessingMetadata) {
+  event.sdkProcessingMetadata = {
+    ...event.sdkProcessingMetadata,
+    ...sdkProcessingMetadata
+  };
+}
+function applySpanToEvent(event, span) {
+  event.contexts = {
+    trace: spanToTraceContext(span),
+    ...event.contexts
+  };
+  event.sdkProcessingMetadata = {
+    dynamicSamplingContext: getDynamicSamplingContextFromSpan(span),
+    ...event.sdkProcessingMetadata
+  };
+  const rootSpan = getRootSpan(span);
+  const transactionName = spanToJSON(rootSpan).description;
+  if (transactionName && !event.transaction && event.type === "transaction") {
+    event.transaction = transactionName;
+  }
+}
+function applyFingerprintToEvent(event, fingerprint) {
+  event.fingerprint = event.fingerprint ? Array.isArray(event.fingerprint) ? event.fingerprint : [event.fingerprint] : [];
+  if (fingerprint) {
+    event.fingerprint = event.fingerprint.concat(fingerprint);
+  }
+  if (!event.fingerprint.length) {
+    delete event.fingerprint;
+  }
+}
+
+// node_modules/@sentry/core/build/esm/utils/debug-ids.js
+var parsedStackResults;
+var lastKeysCount;
+var cachedFilenameDebugIds;
+function getFilenameToDebugIdMap(stackParser) {
+  const debugIdMap = GLOBAL_OBJ._sentryDebugIds;
+  if (!debugIdMap) {
+    return {};
+  }
+  const debugIdKeys = Object.keys(debugIdMap);
+  if (cachedFilenameDebugIds && debugIdKeys.length === lastKeysCount) {
+    return cachedFilenameDebugIds;
+  }
+  lastKeysCount = debugIdKeys.length;
+  cachedFilenameDebugIds = debugIdKeys.reduce((acc, stackKey) => {
+    if (!parsedStackResults) {
+      parsedStackResults = {};
+    }
+    const result = parsedStackResults[stackKey];
+    if (result) {
+      acc[result[0]] = result[1];
+    } else {
+      const parsedStack = stackParser(stackKey);
+      for (let i = parsedStack.length - 1; i >= 0; i--) {
+        const stackFrame = parsedStack[i];
+        const filename = stackFrame?.filename;
+        const debugId = debugIdMap[stackKey];
+        if (filename && debugId) {
+          acc[filename] = debugId;
+          parsedStackResults[stackKey] = [filename, debugId];
+          break;
+        }
+      }
+    }
+    return acc;
+  }, {});
+  return cachedFilenameDebugIds;
+}
+
+// node_modules/@sentry/core/build/esm/utils/prepareEvent.js
+function prepareEvent(options, event, hint, scope, client, isolationScope) {
+  const { normalizeDepth = 3, normalizeMaxBreadth = 1e3 } = options;
+  const prepared = {
+    ...event,
+    event_id: event.event_id || hint.event_id || uuid4(),
+    timestamp: event.timestamp || dateTimestampInSeconds()
+  };
+  const integrations = hint.integrations || options.integrations.map((i) => i.name);
+  applyClientOptions(prepared, options);
+  applyIntegrationsMetadata(prepared, integrations);
+  if (client) {
+    client.emit("applyFrameMetadata", event);
+  }
+  if (event.type === void 0) {
+    applyDebugIds(prepared, options.stackParser);
+  }
+  const finalScope = getFinalScope(scope, hint.captureContext);
+  if (hint.mechanism) {
+    addExceptionMechanism(prepared, hint.mechanism);
+  }
+  const clientEventProcessors = client ? client.getEventProcessors() : [];
+  const data = getGlobalScope().getScopeData();
+  if (isolationScope) {
+    const isolationData = isolationScope.getScopeData();
+    mergeScopeData(data, isolationData);
+  }
+  if (finalScope) {
+    const finalScopeData = finalScope.getScopeData();
+    mergeScopeData(data, finalScopeData);
+  }
+  const attachments = [...hint.attachments || [], ...data.attachments];
+  if (attachments.length) {
+    hint.attachments = attachments;
+  }
+  applyScopeDataToEvent(prepared, data);
+  const eventProcessors = [
+    ...clientEventProcessors,
+    // Run scope event processors _after_ all other processors
+    ...data.eventProcessors
+  ];
+  const result = notifyEventProcessors(eventProcessors, prepared, hint);
+  return result.then((evt) => {
+    if (evt) {
+      applyDebugMeta(evt);
+    }
+    if (typeof normalizeDepth === "number" && normalizeDepth > 0) {
+      return normalizeEvent(evt, normalizeDepth, normalizeMaxBreadth);
+    }
+    return evt;
+  });
+}
+function applyClientOptions(event, options) {
+  const { environment, release, dist, maxValueLength = 250 } = options;
+  event.environment = event.environment || environment || DEFAULT_ENVIRONMENT;
+  if (!event.release && release) {
+    event.release = release;
+  }
+  if (!event.dist && dist) {
+    event.dist = dist;
+  }
+  const request = event.request;
+  if (request?.url) {
+    request.url = truncate(request.url, maxValueLength);
+  }
+}
+function applyDebugIds(event, stackParser) {
+  const filenameDebugIdMap = getFilenameToDebugIdMap(stackParser);
+  event.exception?.values?.forEach((exception) => {
+    exception.stacktrace?.frames?.forEach((frame) => {
+      if (frame.filename) {
+        frame.debug_id = filenameDebugIdMap[frame.filename];
+      }
+    });
+  });
+}
+function applyDebugMeta(event) {
+  const filenameDebugIdMap = {};
+  event.exception?.values?.forEach((exception) => {
+    exception.stacktrace?.frames?.forEach((frame) => {
+      if (frame.debug_id) {
+        if (frame.abs_path) {
+          filenameDebugIdMap[frame.abs_path] = frame.debug_id;
+        } else if (frame.filename) {
+          filenameDebugIdMap[frame.filename] = frame.debug_id;
+        }
+        delete frame.debug_id;
+      }
+    });
+  });
+  if (Object.keys(filenameDebugIdMap).length === 0) {
+    return;
+  }
+  event.debug_meta = event.debug_meta || {};
+  event.debug_meta.images = event.debug_meta.images || [];
+  const images = event.debug_meta.images;
+  Object.entries(filenameDebugIdMap).forEach(([filename, debug_id]) => {
+    images.push({
+      type: "sourcemap",
+      code_file: filename,
+      debug_id
+    });
+  });
+}
+function applyIntegrationsMetadata(event, integrationNames) {
+  if (integrationNames.length > 0) {
+    event.sdk = event.sdk || {};
+    event.sdk.integrations = [...event.sdk.integrations || [], ...integrationNames];
+  }
+}
+function normalizeEvent(event, depth, maxBreadth) {
+  if (!event) {
+    return null;
+  }
+  const normalized = {
+    ...event,
+    ...event.breadcrumbs && {
+      breadcrumbs: event.breadcrumbs.map((b) => ({
+        ...b,
+        ...b.data && {
+          data: normalize(b.data, depth, maxBreadth)
+        }
+      }))
+    },
+    ...event.user && {
+      user: normalize(event.user, depth, maxBreadth)
+    },
+    ...event.contexts && {
+      contexts: normalize(event.contexts, depth, maxBreadth)
+    },
+    ...event.extra && {
+      extra: normalize(event.extra, depth, maxBreadth)
+    }
+  };
+  if (event.contexts?.trace && normalized.contexts) {
+    normalized.contexts.trace = event.contexts.trace;
+    if (event.contexts.trace.data) {
+      normalized.contexts.trace.data = normalize(event.contexts.trace.data, depth, maxBreadth);
+    }
+  }
+  if (event.spans) {
+    normalized.spans = event.spans.map((span) => {
+      return {
+        ...span,
+        ...span.data && {
+          data: normalize(span.data, depth, maxBreadth)
+        }
+      };
+    });
+  }
+  if (event.contexts?.flags && normalized.contexts) {
+    normalized.contexts.flags = normalize(event.contexts.flags, 3, maxBreadth);
+  }
+  return normalized;
+}
+function getFinalScope(scope, captureContext) {
+  if (!captureContext) {
+    return scope;
+  }
+  const finalScope = scope ? scope.clone() : new Scope();
+  finalScope.update(captureContext);
+  return finalScope;
+}
+function parseEventHintOrCaptureContext(hint) {
+  if (!hint) {
+    return void 0;
+  }
+  if (hintIsScopeOrFunction(hint)) {
+    return { captureContext: hint };
+  }
+  if (hintIsScopeContext(hint)) {
+    return {
+      captureContext: hint
+    };
+  }
+  return hint;
+}
+function hintIsScopeOrFunction(hint) {
+  return hint instanceof Scope || typeof hint === "function";
+}
+var captureContextKeys = [
+  "user",
+  "level",
+  "extra",
+  "contexts",
+  "tags",
+  "fingerprint",
+  "propagationContext"
+];
+function hintIsScopeContext(hint) {
+  return Object.keys(hint).some((key) => captureContextKeys.includes(key));
+}
+
+// node_modules/@sentry/core/build/esm/exports.js
+function captureException(exception, hint) {
+  return getCurrentScope().captureException(exception, parseEventHintOrCaptureContext(hint));
+}
+function captureMessage(message, captureContext) {
+  const level = typeof captureContext === "string" ? captureContext : void 0;
+  const context = typeof captureContext !== "string" ? { captureContext } : void 0;
+  return getCurrentScope().captureMessage(message, level, context);
+}
+function captureEvent(event, hint) {
+  return getCurrentScope().captureEvent(event, hint);
+}
+function setContext(name, context) {
+  getIsolationScope().setContext(name, context);
+}
+function startSession(context) {
+  const isolationScope = getIsolationScope();
+  const currentScope = getCurrentScope();
+  const { userAgent } = GLOBAL_OBJ.navigator || {};
+  const session = makeSession({
+    user: currentScope.getUser() || isolationScope.getUser(),
+    ...userAgent && { userAgent },
+    ...context
+  });
+  const currentSession = isolationScope.getSession();
+  if (currentSession?.status === "ok") {
+    updateSession(currentSession, { status: "exited" });
+  }
+  endSession();
+  isolationScope.setSession(session);
+  return session;
+}
+function endSession() {
+  const isolationScope = getIsolationScope();
+  const currentScope = getCurrentScope();
+  const session = currentScope.getSession() || isolationScope.getSession();
+  if (session) {
+    closeSession(session);
+  }
+  _sendSessionUpdate();
+  isolationScope.setSession();
+}
+function _sendSessionUpdate() {
+  const isolationScope = getIsolationScope();
+  const client = getClient();
+  const session = isolationScope.getSession();
+  if (session && client) {
+    client.captureSession(session);
+  }
+}
+function captureSession(end = false) {
+  if (end) {
+    endSession();
+    return;
+  }
+  _sendSessionUpdate();
+}
+
+// node_modules/@sentry/core/build/esm/api.js
+var SENTRY_API_VERSION = "7";
+function getBaseApiEndpoint(dsn) {
+  const protocol = dsn.protocol ? `${dsn.protocol}:` : "";
+  const port = dsn.port ? `:${dsn.port}` : "";
+  return `${protocol}//${dsn.host}${port}${dsn.path ? `/${dsn.path}` : ""}/api/`;
+}
+function _getIngestEndpoint(dsn) {
+  return `${getBaseApiEndpoint(dsn)}${dsn.projectId}/envelope/`;
+}
+function _encodedAuth(dsn, sdkInfo) {
+  const params = {
+    sentry_version: SENTRY_API_VERSION
+  };
+  if (dsn.publicKey) {
+    params.sentry_key = dsn.publicKey;
+  }
+  if (sdkInfo) {
+    params.sentry_client = `${sdkInfo.name}/${sdkInfo.version}`;
+  }
+  return new URLSearchParams(params).toString();
+}
+function getEnvelopeEndpointWithUrlEncodedAuth(dsn, tunnel, sdkInfo) {
+  return tunnel ? tunnel : `${_getIngestEndpoint(dsn)}?${_encodedAuth(dsn, sdkInfo)}`;
+}
+
+// node_modules/@sentry/core/build/esm/integration.js
+var installedIntegrations = [];
+function filterDuplicates(integrations) {
+  const integrationsByName = {};
+  integrations.forEach((currentInstance) => {
+    const { name } = currentInstance;
+    const existingInstance = integrationsByName[name];
+    if (existingInstance && !existingInstance.isDefaultInstance && currentInstance.isDefaultInstance) {
+      return;
+    }
+    integrationsByName[name] = currentInstance;
+  });
+  return Object.values(integrationsByName);
+}
+function getIntegrationsToSetup(options) {
+  const defaultIntegrations = options.defaultIntegrations || [];
+  const userIntegrations = options.integrations;
+  defaultIntegrations.forEach((integration) => {
+    integration.isDefaultInstance = true;
+  });
+  let integrations;
+  if (Array.isArray(userIntegrations)) {
+    integrations = [...defaultIntegrations, ...userIntegrations];
+  } else if (typeof userIntegrations === "function") {
+    const resolvedUserIntegrations = userIntegrations(defaultIntegrations);
+    integrations = Array.isArray(resolvedUserIntegrations) ? resolvedUserIntegrations : [resolvedUserIntegrations];
+  } else {
+    integrations = defaultIntegrations;
+  }
+  return filterDuplicates(integrations);
+}
+function setupIntegrations(client, integrations) {
+  const integrationIndex = {};
+  integrations.forEach((integration) => {
+    if (integration) {
+      setupIntegration(client, integration, integrationIndex);
+    }
+  });
+  return integrationIndex;
+}
+function afterSetupIntegrations(client, integrations) {
+  for (const integration of integrations) {
+    if (integration?.afterAllSetup) {
+      integration.afterAllSetup(client);
+    }
+  }
+}
+function setupIntegration(client, integration, integrationIndex) {
+  if (integrationIndex[integration.name]) {
+    DEBUG_BUILD && debug.log(`Integration skipped because it was already installed: ${integration.name}`);
+    return;
+  }
+  integrationIndex[integration.name] = integration;
+  if (installedIntegrations.indexOf(integration.name) === -1 && typeof integration.setupOnce === "function") {
+    integration.setupOnce();
+    installedIntegrations.push(integration.name);
+  }
+  if (integration.setup && typeof integration.setup === "function") {
+    integration.setup(client);
+  }
+  if (typeof integration.preprocessEvent === "function") {
+    const callback = integration.preprocessEvent.bind(integration);
+    client.on("preprocessEvent", (event, hint) => callback(event, hint, client));
+  }
+  if (typeof integration.processEvent === "function") {
+    const callback = integration.processEvent.bind(integration);
+    const processor = Object.assign((event, hint) => callback(event, hint, client), {
+      id: integration.name
+    });
+    client.addEventProcessor(processor);
+  }
+  DEBUG_BUILD && debug.log(`Integration installed: ${integration.name}`);
+}
+function defineIntegration(fn) {
+  return fn;
+}
+
+// node_modules/@sentry/core/build/esm/utils/clientreport.js
+function createClientReportEnvelope(discarded_events, dsn, timestamp) {
+  const clientReportItem = [
+    { type: "client_report" },
+    {
+      timestamp: timestamp || dateTimestampInSeconds(),
+      discarded_events
+    }
+  ];
+  return createEnvelope(dsn ? { dsn } : {}, [clientReportItem]);
+}
+
+// node_modules/@sentry/core/build/esm/utils/eventUtils.js
+function getPossibleEventMessages(event) {
+  const possibleMessages = [];
+  if (event.message) {
+    possibleMessages.push(event.message);
+  }
+  try {
+    const lastException = event.exception.values[event.exception.values.length - 1];
+    if (lastException?.value) {
+      possibleMessages.push(lastException.value);
+      if (lastException.type) {
+        possibleMessages.push(`${lastException.type}: ${lastException.value}`);
+      }
+    }
+  } catch {
+  }
+  return possibleMessages;
+}
+
+// node_modules/@sentry/core/build/esm/utils/transactionEvent.js
+function convertTransactionEventToSpanJson(event) {
+  const { trace_id, parent_span_id, span_id, status, origin: origin2, data, op } = event.contexts?.trace ?? {};
+  return {
+    data: data ?? {},
+    description: event.transaction,
+    op,
+    parent_span_id,
+    span_id: span_id ?? "",
+    start_timestamp: event.start_timestamp ?? 0,
+    status,
+    timestamp: event.timestamp,
+    trace_id: trace_id ?? "",
+    origin: origin2,
+    profile_id: data?.[SEMANTIC_ATTRIBUTE_PROFILE_ID],
+    exclusive_time: data?.[SEMANTIC_ATTRIBUTE_EXCLUSIVE_TIME],
+    measurements: event.measurements,
+    is_segment: true
+  };
+}
+function convertSpanJsonToTransactionEvent(span) {
+  return {
+    type: "transaction",
+    timestamp: span.timestamp,
+    start_timestamp: span.start_timestamp,
+    transaction: span.description,
+    contexts: {
+      trace: {
+        trace_id: span.trace_id,
+        span_id: span.span_id,
+        parent_span_id: span.parent_span_id,
+        op: span.op,
+        status: span.status,
+        origin: span.origin,
+        data: {
+          ...span.data,
+          ...span.profile_id && { [SEMANTIC_ATTRIBUTE_PROFILE_ID]: span.profile_id },
+          ...span.exclusive_time && { [SEMANTIC_ATTRIBUTE_EXCLUSIVE_TIME]: span.exclusive_time }
+        }
+      }
+    },
+    measurements: span.measurements
+  };
+}
+
+// node_modules/@sentry/core/build/esm/client.js
+var ALREADY_SEEN_ERROR = "Not capturing exception because it's already been captured.";
+var MISSING_RELEASE_FOR_SESSION_ERROR = "Discarded session because of missing or non-string release";
+var INTERNAL_ERROR_SYMBOL = Symbol.for("SentryInternalError");
+var DO_NOT_SEND_EVENT_SYMBOL = Symbol.for("SentryDoNotSendEventError");
+function _makeInternalError(message) {
+  return {
+    message,
+    [INTERNAL_ERROR_SYMBOL]: true
+  };
+}
+function _makeDoNotSendEventError(message) {
+  return {
+    message,
+    [DO_NOT_SEND_EVENT_SYMBOL]: true
+  };
+}
+function _isInternalError(error2) {
+  return !!error2 && typeof error2 === "object" && INTERNAL_ERROR_SYMBOL in error2;
+}
+function _isDoNotSendEventError(error2) {
+  return !!error2 && typeof error2 === "object" && DO_NOT_SEND_EVENT_SYMBOL in error2;
+}
+var Client = class {
+  /** Options passed to the SDK. */
+  /** The client Dsn, if specified in options. Without this Dsn, the SDK will be disabled. */
+  /** Array of set up integrations. */
+  /** Number of calls being processed */
+  /** Holds flushable  */
+  // eslint-disable-next-line @typescript-eslint/ban-types
+  /**
+   * Initializes this client instance.
+   *
+   * @param options Options for the client.
+   */
+  constructor(options) {
+    this._options = options;
+    this._integrations = {};
+    this._numProcessing = 0;
+    this._outcomes = {};
+    this._hooks = {};
+    this._eventProcessors = [];
+    if (options.dsn) {
+      this._dsn = makeDsn(options.dsn);
+    } else {
+      DEBUG_BUILD && debug.warn("No DSN provided, client will not send events.");
+    }
+    if (this._dsn) {
+      const url = getEnvelopeEndpointWithUrlEncodedAuth(
+        this._dsn,
+        options.tunnel,
+        options._metadata ? options._metadata.sdk : void 0
+      );
+      this._transport = options.transport({
+        tunnel: this._options.tunnel,
+        recordDroppedEvent: this.recordDroppedEvent.bind(this),
+        ...options.transportOptions,
+        url
+      });
+    }
+  }
+  /**
+   * Captures an exception event and sends it to Sentry.
+   *
+   * Unlike `captureException` exported from every SDK, this method requires that you pass it the current scope.
+   */
+  captureException(exception, hint, scope) {
+    const eventId = uuid4();
+    if (checkOrSetAlreadyCaught(exception)) {
+      DEBUG_BUILD && debug.log(ALREADY_SEEN_ERROR);
+      return eventId;
+    }
+    const hintWithEventId = {
+      event_id: eventId,
+      ...hint
+    };
+    this._process(
+      this.eventFromException(exception, hintWithEventId).then(
+        (event) => this._captureEvent(event, hintWithEventId, scope)
+      )
+    );
+    return hintWithEventId.event_id;
+  }
+  /**
+   * Captures a message event and sends it to Sentry.
+   *
+   * Unlike `captureMessage` exported from every SDK, this method requires that you pass it the current scope.
+   */
+  captureMessage(message, level, hint, currentScope) {
+    const hintWithEventId = {
+      event_id: uuid4(),
+      ...hint
+    };
+    const eventMessage = isParameterizedString(message) ? message : String(message);
+    const promisedEvent = isPrimitive(message) ? this.eventFromMessage(eventMessage, level, hintWithEventId) : this.eventFromException(message, hintWithEventId);
+    this._process(promisedEvent.then((event) => this._captureEvent(event, hintWithEventId, currentScope)));
+    return hintWithEventId.event_id;
+  }
+  /**
+   * Captures a manually created event and sends it to Sentry.
+   *
+   * Unlike `captureEvent` exported from every SDK, this method requires that you pass it the current scope.
+   */
+  captureEvent(event, hint, currentScope) {
+    const eventId = uuid4();
+    if (hint?.originalException && checkOrSetAlreadyCaught(hint.originalException)) {
+      DEBUG_BUILD && debug.log(ALREADY_SEEN_ERROR);
+      return eventId;
+    }
+    const hintWithEventId = {
+      event_id: eventId,
+      ...hint
+    };
+    const sdkProcessingMetadata = event.sdkProcessingMetadata || {};
+    const capturedSpanScope = sdkProcessingMetadata.capturedSpanScope;
+    const capturedSpanIsolationScope = sdkProcessingMetadata.capturedSpanIsolationScope;
+    this._process(
+      this._captureEvent(event, hintWithEventId, capturedSpanScope || currentScope, capturedSpanIsolationScope)
+    );
+    return hintWithEventId.event_id;
+  }
+  /**
+   * Captures a session.
+   */
+  captureSession(session) {
+    this.sendSession(session);
+    updateSession(session, { init: false });
+  }
+  /**
+   * Create a cron monitor check in and send it to Sentry. This method is not available on all clients.
+   *
+   * @param checkIn An object that describes a check in.
+   * @param upsertMonitorConfig An optional object that describes a monitor config. Use this if you want
+   * to create a monitor automatically when sending a check in.
+   * @param scope An optional scope containing event metadata.
+   * @returns A string representing the id of the check in.
+   */
+  /**
+   * Get the current Dsn.
+   */
+  getDsn() {
+    return this._dsn;
+  }
+  /**
+   * Get the current options.
+   */
+  getOptions() {
+    return this._options;
+  }
+  /**
+   * Get the SDK metadata.
+   * @see SdkMetadata
+   */
+  getSdkMetadata() {
+    return this._options._metadata;
+  }
+  /**
+   * Returns the transport that is used by the client.
+   * Please note that the transport gets lazy initialized so it will only be there once the first event has been sent.
+   */
+  getTransport() {
+    return this._transport;
+  }
+  /**
+   * Wait for all events to be sent or the timeout to expire, whichever comes first.
+   *
+   * @param timeout Maximum time in ms the client should wait for events to be flushed. Omitting this parameter will
+   *   cause the client to wait until all events are sent before resolving the promise.
+   * @returns A promise that will resolve with `true` if all events are sent before the timeout, or `false` if there are
+   * still events in the queue when the timeout is reached.
+   */
+  flush(timeout) {
+    const transport = this._transport;
+    if (transport) {
+      this.emit("flush");
+      return this._isClientDoneProcessing(timeout).then((clientFinished) => {
+        return transport.flush(timeout).then((transportFlushed) => clientFinished && transportFlushed);
+      });
+    } else {
+      return resolvedSyncPromise(true);
+    }
+  }
+  /**
+   * Flush the event queue and set the client to `enabled = false`. See {@link Client.flush}.
+   *
+   * @param {number} timeout Maximum time in ms the client should wait before shutting down. Omitting this parameter will cause
+   *   the client to wait until all events are sent before disabling itself.
+   * @returns {Promise<boolean>} A promise which resolves to `true` if the flush completes successfully before the timeout, or `false` if
+   * it doesn't.
+   */
+  close(timeout) {
+    return this.flush(timeout).then((result) => {
+      this.getOptions().enabled = false;
+      this.emit("close");
+      return result;
+    });
+  }
+  /**
+   * Get all installed event processors.
+   */
+  getEventProcessors() {
+    return this._eventProcessors;
+  }
+  /**
+   * Adds an event processor that applies to any event processed by this client.
+   */
+  addEventProcessor(eventProcessor) {
+    this._eventProcessors.push(eventProcessor);
+  }
+  /**
+   * Initialize this client.
+   * Call this after the client was set on a scope.
+   */
+  init() {
+    if (this._isEnabled() || // Force integrations to be setup even if no DSN was set when we have
+    // Spotlight enabled. This is particularly important for browser as we
+    // don't support the `spotlight` option there and rely on the users
+    // adding the `spotlightBrowserIntegration()` to their integrations which
+    // wouldn't get initialized with the check below when there's no DSN set.
+    this._options.integrations.some(({ name }) => name.startsWith("Spotlight"))) {
+      this._setupIntegrations();
+    }
+  }
+  /**
+   * Gets an installed integration by its name.
+   *
+   * @returns {Integration|undefined} The installed integration or `undefined` if no integration with that `name` was installed.
+   */
+  getIntegrationByName(integrationName) {
+    return this._integrations[integrationName];
+  }
+  /**
+   * Add an integration to the client.
+   * This can be used to e.g. lazy load integrations.
+   * In most cases, this should not be necessary,
+   * and you're better off just passing the integrations via `integrations: []` at initialization time.
+   * However, if you find the need to conditionally load & add an integration, you can use `addIntegration` to do so.
+   */
+  addIntegration(integration) {
+    const isAlreadyInstalled = this._integrations[integration.name];
+    setupIntegration(this, integration, this._integrations);
+    if (!isAlreadyInstalled) {
+      afterSetupIntegrations(this, [integration]);
+    }
+  }
+  /**
+   * Send a fully prepared event to Sentry.
+   */
+  sendEvent(event, hint = {}) {
+    this.emit("beforeSendEvent", event, hint);
+    let env = createEventEnvelope(event, this._dsn, this._options._metadata, this._options.tunnel);
+    for (const attachment of hint.attachments || []) {
+      env = addItemToEnvelope(env, createAttachmentEnvelopeItem(attachment));
+    }
+    const promise = this.sendEnvelope(env);
+    if (promise) {
+      promise.then((sendResponse) => this.emit("afterSendEvent", event, sendResponse), null);
+    }
+  }
+  /**
+   * Send a session or session aggregrates to Sentry.
+   */
+  sendSession(session) {
+    const { release: clientReleaseOption, environment: clientEnvironmentOption = DEFAULT_ENVIRONMENT } = this._options;
+    if ("aggregates" in session) {
+      const sessionAttrs = session.attrs || {};
+      if (!sessionAttrs.release && !clientReleaseOption) {
+        DEBUG_BUILD && debug.warn(MISSING_RELEASE_FOR_SESSION_ERROR);
+        return;
+      }
+      sessionAttrs.release = sessionAttrs.release || clientReleaseOption;
+      sessionAttrs.environment = sessionAttrs.environment || clientEnvironmentOption;
+      session.attrs = sessionAttrs;
+    } else {
+      if (!session.release && !clientReleaseOption) {
+        DEBUG_BUILD && debug.warn(MISSING_RELEASE_FOR_SESSION_ERROR);
+        return;
+      }
+      session.release = session.release || clientReleaseOption;
+      session.environment = session.environment || clientEnvironmentOption;
+    }
+    this.emit("beforeSendSession", session);
+    const env = createSessionEnvelope(session, this._dsn, this._options._metadata, this._options.tunnel);
+    this.sendEnvelope(env);
+  }
+  /**
+   * Record on the client that an event got dropped (ie, an event that will not be sent to Sentry).
+   */
+  recordDroppedEvent(reason, category, count2 = 1) {
+    if (this._options.sendClientReports) {
+      const key = `${reason}:${category}`;
+      DEBUG_BUILD && debug.log(`Recording outcome: "${key}"${count2 > 1 ? ` (${count2} times)` : ""}`);
+      this._outcomes[key] = (this._outcomes[key] || 0) + count2;
+    }
+  }
+  /* eslint-disable @typescript-eslint/unified-signatures */
+  /**
+   * Register a callback for whenever a span is started.
+   * Receives the span as argument.
+   * @returns {() => void} A function that, when executed, removes the registered callback.
+   */
+  /**
+   * Register a hook on this client.
+   */
+  on(hook, callback) {
+    const hooks = this._hooks[hook] = this._hooks[hook] || [];
+    hooks.push(callback);
+    return () => {
+      const cbIndex = hooks.indexOf(callback);
+      if (cbIndex > -1) {
+        hooks.splice(cbIndex, 1);
+      }
+    };
+  }
+  /** Fire a hook whenever a span starts. */
+  /**
+   * Emit a hook that was previously registered via `on()`.
+   */
+  emit(hook, ...rest) {
+    const callbacks = this._hooks[hook];
+    if (callbacks) {
+      callbacks.forEach((callback) => callback(...rest));
+    }
+  }
+  /**
+   * Send an envelope to Sentry.
+   */
+  sendEnvelope(envelope) {
+    this.emit("beforeEnvelope", envelope);
+    if (this._isEnabled() && this._transport) {
+      return this._transport.send(envelope).then(null, (reason) => {
+        DEBUG_BUILD && debug.error("Error while sending envelope:", reason);
+        return reason;
+      });
+    }
+    DEBUG_BUILD && debug.error("Transport disabled");
+    return resolvedSyncPromise({});
+  }
+  /* eslint-enable @typescript-eslint/unified-signatures */
+  /** Setup integrations for this client. */
+  _setupIntegrations() {
+    const { integrations } = this._options;
+    this._integrations = setupIntegrations(this, integrations);
+    afterSetupIntegrations(this, integrations);
+  }
+  /** Updates existing session based on the provided event */
+  _updateSessionFromEvent(session, event) {
+    let crashed = event.level === "fatal";
+    let errored = false;
+    const exceptions = event.exception?.values;
+    if (exceptions) {
+      errored = true;
+      for (const ex of exceptions) {
+        const mechanism = ex.mechanism;
+        if (mechanism?.handled === false) {
+          crashed = true;
+          break;
+        }
+      }
+    }
+    const sessionNonTerminal = session.status === "ok";
+    const shouldUpdateAndSend = sessionNonTerminal && session.errors === 0 || sessionNonTerminal && crashed;
+    if (shouldUpdateAndSend) {
+      updateSession(session, {
+        ...crashed && { status: "crashed" },
+        errors: session.errors || Number(errored || crashed)
+      });
+      this.captureSession(session);
+    }
+  }
+  /**
+   * Determine if the client is finished processing. Returns a promise because it will wait `timeout` ms before saying
+   * "no" (resolving to `false`) in order to give the client a chance to potentially finish first.
+   *
+   * @param timeout The time, in ms, after which to resolve to `false` if the client is still busy. Passing `0` (or not
+   * passing anything) will make the promise wait as long as it takes for processing to finish before resolving to
+   * `true`.
+   * @returns A promise which will resolve to `true` if processing is already done or finishes before the timeout, and
+   * `false` otherwise
+   */
+  _isClientDoneProcessing(timeout) {
+    return new SyncPromise((resolve) => {
+      let ticked = 0;
+      const tick = 1;
+      const interval = setInterval(() => {
+        if (this._numProcessing == 0) {
+          clearInterval(interval);
+          resolve(true);
+        } else {
+          ticked += tick;
+          if (timeout && ticked >= timeout) {
+            clearInterval(interval);
+            resolve(false);
+          }
+        }
+      }, tick);
+    });
+  }
+  /** Determines whether this SDK is enabled and a transport is present. */
+  _isEnabled() {
+    return this.getOptions().enabled !== false && this._transport !== void 0;
+  }
+  /**
+   * Adds common information to events.
+   *
+   * The information includes release and environment from `options`,
+   * breadcrumbs and context (extra, tags and user) from the scope.
+   *
+   * Information that is already present in the event is never overwritten. For
+   * nested objects, such as the context, keys are merged.
+   *
+   * @param event The original event.
+   * @param hint May contain additional information about the original exception.
+   * @param currentScope A scope containing event metadata.
+   * @returns A new event with more information.
+   */
+  _prepareEvent(event, hint, currentScope, isolationScope) {
+    const options = this.getOptions();
+    const integrations = Object.keys(this._integrations);
+    if (!hint.integrations && integrations?.length) {
+      hint.integrations = integrations;
+    }
+    this.emit("preprocessEvent", event, hint);
+    if (!event.type) {
+      isolationScope.setLastEventId(event.event_id || hint.event_id);
+    }
+    return prepareEvent(options, event, hint, currentScope, this, isolationScope).then((evt) => {
+      if (evt === null) {
+        return evt;
+      }
+      this.emit("postprocessEvent", evt, hint);
+      evt.contexts = {
+        trace: getTraceContextFromScope(currentScope),
+        ...evt.contexts
+      };
+      const dynamicSamplingContext = getDynamicSamplingContextFromScope(this, currentScope);
+      evt.sdkProcessingMetadata = {
+        dynamicSamplingContext,
+        ...evt.sdkProcessingMetadata
+      };
+      return evt;
+    });
+  }
+  /**
+   * Processes the event and logs an error in case of rejection
+   * @param event
+   * @param hint
+   * @param scope
+   */
+  _captureEvent(event, hint = {}, currentScope = getCurrentScope(), isolationScope = getIsolationScope()) {
+    if (DEBUG_BUILD && isErrorEvent2(event)) {
+      debug.log(`Captured error event \`${getPossibleEventMessages(event)[0] || "<unknown>"}\``);
+    }
+    return this._processEvent(event, hint, currentScope, isolationScope).then(
+      (finalEvent) => {
+        return finalEvent.event_id;
+      },
+      (reason) => {
+        if (DEBUG_BUILD) {
+          if (_isDoNotSendEventError(reason)) {
+            debug.log(reason.message);
+          } else if (_isInternalError(reason)) {
+            debug.warn(reason.message);
+          } else {
+            debug.warn(reason);
+          }
+        }
+        return void 0;
+      }
+    );
+  }
+  /**
+   * Processes an event (either error or message) and sends it to Sentry.
+   *
+   * This also adds breadcrumbs and context information to the event. However,
+   * platform specific meta data (such as the User's IP address) must be added
+   * by the SDK implementor.
+   *
+   *
+   * @param event The event to send to Sentry.
+   * @param hint May contain additional information about the original exception.
+   * @param currentScope A scope containing event metadata.
+   * @returns A SyncPromise that resolves with the event or rejects in case event was/will not be send.
+   */
+  _processEvent(event, hint, currentScope, isolationScope) {
+    const options = this.getOptions();
+    const { sampleRate } = options;
+    const isTransaction = isTransactionEvent(event);
+    const isError2 = isErrorEvent2(event);
+    const eventType = event.type || "error";
+    const beforeSendLabel = `before send for type \`${eventType}\``;
+    const parsedSampleRate = typeof sampleRate === "undefined" ? void 0 : parseSampleRate(sampleRate);
+    if (isError2 && typeof parsedSampleRate === "number" && Math.random() > parsedSampleRate) {
+      this.recordDroppedEvent("sample_rate", "error");
+      return rejectedSyncPromise(
+        _makeDoNotSendEventError(
+          `Discarding event because it's not included in the random sample (sampling rate = ${sampleRate})`
+        )
+      );
+    }
+    const dataCategory = eventType === "replay_event" ? "replay" : eventType;
+    return this._prepareEvent(event, hint, currentScope, isolationScope).then((prepared) => {
+      if (prepared === null) {
+        this.recordDroppedEvent("event_processor", dataCategory);
+        throw _makeDoNotSendEventError("An event processor returned `null`, will not send event.");
+      }
+      const isInternalException = hint.data && hint.data.__sentry__ === true;
+      if (isInternalException) {
+        return prepared;
+      }
+      const result = processBeforeSend(this, options, prepared, hint);
+      return _validateBeforeSendResult(result, beforeSendLabel);
+    }).then((processedEvent) => {
+      if (processedEvent === null) {
+        this.recordDroppedEvent("before_send", dataCategory);
+        if (isTransaction) {
+          const spans = event.spans || [];
+          const spanCount = 1 + spans.length;
+          this.recordDroppedEvent("before_send", "span", spanCount);
+        }
+        throw _makeDoNotSendEventError(`${beforeSendLabel} returned \`null\`, will not send event.`);
+      }
+      const session = currentScope.getSession() || isolationScope.getSession();
+      if (isError2 && session) {
+        this._updateSessionFromEvent(session, processedEvent);
+      }
+      if (isTransaction) {
+        const spanCountBefore = processedEvent.sdkProcessingMetadata?.spanCountBeforeProcessing || 0;
+        const spanCountAfter = processedEvent.spans ? processedEvent.spans.length : 0;
+        const droppedSpanCount = spanCountBefore - spanCountAfter;
+        if (droppedSpanCount > 0) {
+          this.recordDroppedEvent("before_send", "span", droppedSpanCount);
+        }
+      }
+      const transactionInfo = processedEvent.transaction_info;
+      if (isTransaction && transactionInfo && processedEvent.transaction !== event.transaction) {
+        const source = "custom";
+        processedEvent.transaction_info = {
+          ...transactionInfo,
+          source
+        };
+      }
+      this.sendEvent(processedEvent, hint);
+      return processedEvent;
+    }).then(null, (reason) => {
+      if (_isDoNotSendEventError(reason) || _isInternalError(reason)) {
+        throw reason;
+      }
+      this.captureException(reason, {
+        data: {
+          __sentry__: true
+        },
+        originalException: reason
+      });
+      throw _makeInternalError(
+        `Event processing pipeline threw an error, original event will not be sent. Details have been sent as a new event.
+Reason: ${reason}`
+      );
+    });
+  }
+  /**
+   * Occupies the client with processing and event
+   */
+  _process(promise) {
+    this._numProcessing++;
+    void promise.then(
+      (value) => {
+        this._numProcessing--;
+        return value;
+      },
+      (reason) => {
+        this._numProcessing--;
+        return reason;
+      }
+    );
+  }
+  /**
+   * Clears outcomes on this client and returns them.
+   */
+  _clearOutcomes() {
+    const outcomes = this._outcomes;
+    this._outcomes = {};
+    return Object.entries(outcomes).map(([key, quantity]) => {
+      const [reason, category] = key.split(":");
+      return {
+        reason,
+        category,
+        quantity
+      };
+    });
+  }
+  /**
+   * Sends client reports as an envelope.
+   */
+  _flushOutcomes() {
+    DEBUG_BUILD && debug.log("Flushing outcomes...");
+    const outcomes = this._clearOutcomes();
+    if (outcomes.length === 0) {
+      DEBUG_BUILD && debug.log("No outcomes to send");
+      return;
+    }
+    if (!this._dsn) {
+      DEBUG_BUILD && debug.log("No dsn provided, will not send outcomes");
+      return;
+    }
+    DEBUG_BUILD && debug.log("Sending outcomes:", outcomes);
+    const envelope = createClientReportEnvelope(outcomes, this._options.tunnel && dsnToString(this._dsn));
+    this.sendEnvelope(envelope);
+  }
+  /**
+   * Creates an {@link Event} from all inputs to `captureException` and non-primitive inputs to `captureMessage`.
+   */
+};
+function _validateBeforeSendResult(beforeSendResult, beforeSendLabel) {
+  const invalidValueError = `${beforeSendLabel} must return \`null\` or a valid event.`;
+  if (isThenable(beforeSendResult)) {
+    return beforeSendResult.then(
+      (event) => {
+        if (!isPlainObject(event) && event !== null) {
+          throw _makeInternalError(invalidValueError);
+        }
+        return event;
+      },
+      (e) => {
+        throw _makeInternalError(`${beforeSendLabel} rejected with ${e}`);
+      }
+    );
+  } else if (!isPlainObject(beforeSendResult) && beforeSendResult !== null) {
+    throw _makeInternalError(invalidValueError);
+  }
+  return beforeSendResult;
+}
+function processBeforeSend(client, options, event, hint) {
+  const { beforeSend, beforeSendTransaction, beforeSendSpan } = options;
+  let processedEvent = event;
+  if (isErrorEvent2(processedEvent) && beforeSend) {
+    return beforeSend(processedEvent, hint);
+  }
+  if (isTransactionEvent(processedEvent)) {
+    if (beforeSendSpan) {
+      const processedRootSpanJson = beforeSendSpan(convertTransactionEventToSpanJson(processedEvent));
+      if (!processedRootSpanJson) {
+        showSpanDropWarning();
+      } else {
+        processedEvent = merge(event, convertSpanJsonToTransactionEvent(processedRootSpanJson));
+      }
+      if (processedEvent.spans) {
+        const processedSpans = [];
+        for (const span of processedEvent.spans) {
+          const processedSpan = beforeSendSpan(span);
+          if (!processedSpan) {
+            showSpanDropWarning();
+            processedSpans.push(span);
+          } else {
+            processedSpans.push(processedSpan);
+          }
+        }
+        processedEvent.spans = processedSpans;
+      }
+    }
+    if (beforeSendTransaction) {
+      if (processedEvent.spans) {
+        const spanCountBefore = processedEvent.spans.length;
+        processedEvent.sdkProcessingMetadata = {
+          ...event.sdkProcessingMetadata,
+          spanCountBeforeProcessing: spanCountBefore
+        };
+      }
+      return beforeSendTransaction(processedEvent, hint);
+    }
+  }
+  return processedEvent;
+}
+function isErrorEvent2(event) {
+  return event.type === void 0;
+}
+function isTransactionEvent(event) {
+  return event.type === "transaction";
+}
+
+// node_modules/@sentry/core/build/esm/logs/envelope.js
+function createLogContainerEnvelopeItem(items) {
+  return [
+    {
+      type: "log",
+      item_count: items.length,
+      content_type: "application/vnd.sentry.items.log+json"
+    },
+    {
+      items
+    }
+  ];
+}
+function createLogEnvelope(logs, metadata, tunnel, dsn) {
+  const headers = {};
+  if (metadata?.sdk) {
+    headers.sdk = {
+      name: metadata.sdk.name,
+      version: metadata.sdk.version
+    };
+  }
+  if (!!tunnel && !!dsn) {
+    headers.dsn = dsnToString(dsn);
+  }
+  return createEnvelope(headers, [createLogContainerEnvelopeItem(logs)]);
+}
+
+// node_modules/@sentry/core/build/esm/logs/exports.js
+function _INTERNAL_flushLogsBuffer(client, maybeLogBuffer) {
+  const logBuffer = maybeLogBuffer ?? _INTERNAL_getLogBuffer(client) ?? [];
+  if (logBuffer.length === 0) {
+    return;
+  }
+  const clientOptions = client.getOptions();
+  const envelope = createLogEnvelope(logBuffer, clientOptions._metadata, clientOptions.tunnel, client.getDsn());
+  _getBufferMap().set(client, []);
+  client.emit("flushLogs");
+  client.sendEnvelope(envelope);
+}
+function _INTERNAL_getLogBuffer(client) {
+  return _getBufferMap().get(client);
+}
+function _getBufferMap() {
+  return getGlobalSingleton("clientToLogBufferMap", () => /* @__PURE__ */ new WeakMap());
+}
+
+// node_modules/@sentry/core/build/esm/sdk.js
+function initAndBind(clientClass, options) {
+  if (options.debug === true) {
+    if (DEBUG_BUILD) {
+      debug.enable();
+    } else {
+      consoleSandbox(() => {
+        console.warn("[Sentry] Cannot initialize SDK with `debug` option using a non-debug bundle.");
+      });
+    }
+  }
+  const scope = getCurrentScope();
+  scope.update(options.initialScope);
+  const client = new clientClass(options);
+  setCurrentClient(client);
+  client.init();
+  return client;
+}
+function setCurrentClient(client) {
+  getCurrentScope().setClient(client);
+}
+
+// node_modules/@sentry/core/build/esm/utils/promisebuffer.js
+var SENTRY_BUFFER_FULL_ERROR = Symbol.for("SentryBufferFullError");
+function makePromiseBuffer(limit) {
+  const buffer = [];
+  function isReady() {
+    return limit === void 0 || buffer.length < limit;
+  }
+  function remove(task) {
+    return buffer.splice(buffer.indexOf(task), 1)[0] || Promise.resolve(void 0);
+  }
+  function add(taskProducer) {
+    if (!isReady()) {
+      return rejectedSyncPromise(SENTRY_BUFFER_FULL_ERROR);
+    }
+    const task = taskProducer();
+    if (buffer.indexOf(task) === -1) {
+      buffer.push(task);
+    }
+    void task.then(() => remove(task)).then(
+      null,
+      () => remove(task).then(null, () => {
+      })
+    );
+    return task;
+  }
+  function drain(timeout) {
+    return new SyncPromise((resolve, reject) => {
+      let counter = buffer.length;
+      if (!counter) {
+        return resolve(true);
+      }
+      const capturedSetTimeout = setTimeout(() => {
+        if (timeout && timeout > 0) {
+          resolve(false);
+        }
+      }, timeout);
+      buffer.forEach((item) => {
+        void resolvedSyncPromise(item).then(() => {
+          if (!--counter) {
+            clearTimeout(capturedSetTimeout);
+            resolve(true);
+          }
+        }, reject);
+      });
+    });
+  }
+  return {
+    $: buffer,
+    add,
+    drain
+  };
+}
+
+// node_modules/@sentry/core/build/esm/utils/ratelimit.js
+var DEFAULT_RETRY_AFTER = 60 * 1e3;
+function parseRetryAfterHeader(header, now = Date.now()) {
+  const headerDelay = parseInt(`${header}`, 10);
+  if (!isNaN(headerDelay)) {
+    return headerDelay * 1e3;
+  }
+  const headerDate = Date.parse(`${header}`);
+  if (!isNaN(headerDate)) {
+    return headerDate - now;
+  }
+  return DEFAULT_RETRY_AFTER;
+}
+function disabledUntil(limits, dataCategory) {
+  return limits[dataCategory] || limits.all || 0;
+}
+function isRateLimited(limits, dataCategory, now = Date.now()) {
+  return disabledUntil(limits, dataCategory) > now;
+}
+function updateRateLimits(limits, { statusCode, headers }, now = Date.now()) {
+  const updatedRateLimits = {
+    ...limits
+  };
+  const rateLimitHeader = headers?.["x-sentry-rate-limits"];
+  const retryAfterHeader = headers?.["retry-after"];
+  if (rateLimitHeader) {
+    for (const limit of rateLimitHeader.trim().split(",")) {
+      const [retryAfter, categories, , , namespaces] = limit.split(":", 5);
+      const headerDelay = parseInt(retryAfter, 10);
+      const delay = (!isNaN(headerDelay) ? headerDelay : 60) * 1e3;
+      if (!categories) {
+        updatedRateLimits.all = now + delay;
+      } else {
+        for (const category of categories.split(";")) {
+          if (category === "metric_bucket") {
+            if (!namespaces || namespaces.split(";").includes("custom")) {
+              updatedRateLimits[category] = now + delay;
+            }
+          } else {
+            updatedRateLimits[category] = now + delay;
+          }
+        }
+      }
+    }
+  } else if (retryAfterHeader) {
+    updatedRateLimits.all = now + parseRetryAfterHeader(retryAfterHeader, now);
+  } else if (statusCode === 429) {
+    updatedRateLimits.all = now + 60 * 1e3;
+  }
+  return updatedRateLimits;
+}
+
+// node_modules/@sentry/core/build/esm/transports/base.js
+var DEFAULT_TRANSPORT_BUFFER_SIZE = 64;
+function createTransport(options, makeRequest, buffer = makePromiseBuffer(
+  options.bufferSize || DEFAULT_TRANSPORT_BUFFER_SIZE
+)) {
+  let rateLimits = {};
+  const flush2 = (timeout) => buffer.drain(timeout);
+  function send(envelope) {
+    const filteredEnvelopeItems = [];
+    forEachEnvelopeItem(envelope, (item, type) => {
+      const dataCategory = envelopeItemTypeToDataCategory(type);
+      if (isRateLimited(rateLimits, dataCategory)) {
+        options.recordDroppedEvent("ratelimit_backoff", dataCategory);
+      } else {
+        filteredEnvelopeItems.push(item);
+      }
+    });
+    if (filteredEnvelopeItems.length === 0) {
+      return resolvedSyncPromise({});
+    }
+    const filteredEnvelope = createEnvelope(envelope[0], filteredEnvelopeItems);
+    const recordEnvelopeLoss = (reason) => {
+      forEachEnvelopeItem(filteredEnvelope, (item, type) => {
+        options.recordDroppedEvent(reason, envelopeItemTypeToDataCategory(type));
+      });
+    };
+    const requestTask = () => makeRequest({ body: serializeEnvelope(filteredEnvelope) }).then(
+      (response) => {
+        if (response.statusCode !== void 0 && (response.statusCode < 200 || response.statusCode >= 300)) {
+          DEBUG_BUILD && debug.warn(`Sentry responded with status code ${response.statusCode} to sent event.`);
+        }
+        rateLimits = updateRateLimits(rateLimits, response);
+        return response;
+      },
+      (error2) => {
+        recordEnvelopeLoss("network_error");
+        DEBUG_BUILD && debug.error("Encountered error running transport request:", error2);
+        throw error2;
+      }
+    );
+    return buffer.add(requestTask).then(
+      (result) => result,
+      (error2) => {
+        if (error2 === SENTRY_BUFFER_FULL_ERROR) {
+          DEBUG_BUILD && debug.error("Skipped sending event because buffer is full.");
+          recordEnvelopeLoss("queue_overflow");
+          return resolvedSyncPromise({});
+        } else {
+          throw error2;
+        }
+      }
+    );
+  }
+  return {
+    send,
+    flush: flush2
+  };
+}
+
+// node_modules/@sentry/core/build/esm/utils/ipAddress.js
+function addAutoIpAddressToUser(objWithMaybeUser) {
+  if (objWithMaybeUser.user?.ip_address === void 0) {
+    objWithMaybeUser.user = {
+      ...objWithMaybeUser.user,
+      ip_address: "{{auto}}"
+    };
+  }
+}
+function addAutoIpAddressToSession(session) {
+  if ("aggregates" in session) {
+    if (session.attrs?.["ip_address"] === void 0) {
+      session.attrs = {
+        ...session.attrs,
+        ip_address: "{{auto}}"
+      };
+    }
+  } else {
+    if (session.ipAddress === void 0) {
+      session.ipAddress = "{{auto}}";
+    }
+  }
+}
+
+// node_modules/@sentry/core/build/esm/utils/sdkMetadata.js
+function applySdkMetadata(options, name, names = [name], source = "npm") {
+  const metadata = options._metadata || {};
+  if (!metadata.sdk) {
+    metadata.sdk = {
+      name: `sentry.javascript.${name}`,
+      packages: names.map((name2) => ({
+        name: `${source}:@sentry/${name2}`,
+        version: SDK_VERSION
+      })),
+      version: SDK_VERSION
+    };
+  }
+  options._metadata = metadata;
+}
+
+// node_modules/@sentry/core/build/esm/breadcrumbs.js
+var DEFAULT_BREADCRUMBS = 100;
+function addBreadcrumb(breadcrumb, hint) {
+  const client = getClient();
+  const isolationScope = getIsolationScope();
+  if (!client) return;
+  const { beforeBreadcrumb = null, maxBreadcrumbs = DEFAULT_BREADCRUMBS } = client.getOptions();
+  if (maxBreadcrumbs <= 0) return;
+  const timestamp = dateTimestampInSeconds();
+  const mergedBreadcrumb = { timestamp, ...breadcrumb };
+  const finalBreadcrumb = beforeBreadcrumb ? consoleSandbox(() => beforeBreadcrumb(mergedBreadcrumb, hint)) : mergedBreadcrumb;
+  if (finalBreadcrumb === null) return;
+  if (client.emit) {
+    client.emit("beforeAddBreadcrumb", finalBreadcrumb, hint);
+  }
+  isolationScope.addBreadcrumb(finalBreadcrumb, maxBreadcrumbs);
+}
+
+// node_modules/@sentry/core/build/esm/integrations/functiontostring.js
+var originalFunctionToString;
+var INTEGRATION_NAME = "FunctionToString";
+var SETUP_CLIENTS = /* @__PURE__ */ new WeakMap();
+var _functionToStringIntegration = (() => {
+  return {
+    name: INTEGRATION_NAME,
+    setupOnce() {
+      originalFunctionToString = Function.prototype.toString;
+      try {
+        Function.prototype.toString = function(...args) {
+          const originalFunction = getOriginalFunction(this);
+          const context = SETUP_CLIENTS.has(getClient()) && originalFunction !== void 0 ? originalFunction : this;
+          return originalFunctionToString.apply(context, args);
+        };
+      } catch {
+      }
+    },
+    setup(client) {
+      SETUP_CLIENTS.set(client, true);
+    }
+  };
+});
+var functionToStringIntegration = defineIntegration(_functionToStringIntegration);
+
+// node_modules/@sentry/core/build/esm/integrations/eventFilters.js
+var DEFAULT_IGNORE_ERRORS = [
+  /^Script error\.?$/,
+  /^Javascript error: Script error\.? on line 0$/,
+  /^ResizeObserver loop completed with undelivered notifications.$/,
+  // The browser logs this when a ResizeObserver handler takes a bit longer. Usually this is not an actual issue though. It indicates slowness.
+  /^Cannot redefine property: googletag$/,
+  // This is thrown when google tag manager is used in combination with an ad blocker
+  /^Can't find variable: gmo$/,
+  // Error from Google Search App https://issuetracker.google.com/issues/396043331
+  /^undefined is not an object \(evaluating 'a\.[A-Z]'\)$/,
+  // Random error that happens but not actionable or noticeable to end-users.
+  `can't redefine non-configurable property "solana"`,
+  // Probably a browser extension or custom browser (Brave) throwing this error
+  "vv().getRestrictions is not a function. (In 'vv().getRestrictions(1,a)', 'vv().getRestrictions' is undefined)",
+  // Error thrown by GTM, seemingly not affecting end-users
+  "Can't find variable: _AutofillCallbackHandler",
+  // Unactionable error in instagram webview https://developers.facebook.com/community/threads/320013549791141/
+  /^Non-Error promise rejection captured with value: Object Not Found Matching Id:\d+, MethodName:simulateEvent, ParamCount:\d+$/,
+  // unactionable error from CEFSharp, a .NET library that embeds chromium in .NET apps
+  /^Java exception was raised during method invocation$/
+  // error from Facebook Mobile browser (https://github.com/getsentry/sentry-javascript/issues/15065)
+];
+var INTEGRATION_NAME2 = "EventFilters";
+var eventFiltersIntegration = defineIntegration((options = {}) => {
+  let mergedOptions;
+  return {
+    name: INTEGRATION_NAME2,
+    setup(client) {
+      const clientOptions = client.getOptions();
+      mergedOptions = _mergeOptions(options, clientOptions);
+    },
+    processEvent(event, _hint, client) {
+      if (!mergedOptions) {
+        const clientOptions = client.getOptions();
+        mergedOptions = _mergeOptions(options, clientOptions);
+      }
+      return _shouldDropEvent(event, mergedOptions) ? null : event;
+    }
+  };
+});
+var inboundFiltersIntegration = defineIntegration(((options = {}) => {
+  return {
+    ...eventFiltersIntegration(options),
+    name: "InboundFilters"
+  };
+}));
+function _mergeOptions(internalOptions = {}, clientOptions = {}) {
+  return {
+    allowUrls: [...internalOptions.allowUrls || [], ...clientOptions.allowUrls || []],
+    denyUrls: [...internalOptions.denyUrls || [], ...clientOptions.denyUrls || []],
+    ignoreErrors: [
+      ...internalOptions.ignoreErrors || [],
+      ...clientOptions.ignoreErrors || [],
+      ...internalOptions.disableErrorDefaults ? [] : DEFAULT_IGNORE_ERRORS
+    ],
+    ignoreTransactions: [...internalOptions.ignoreTransactions || [], ...clientOptions.ignoreTransactions || []]
+  };
+}
+function _shouldDropEvent(event, options) {
+  if (!event.type) {
+    if (_isIgnoredError(event, options.ignoreErrors)) {
+      DEBUG_BUILD && debug.warn(
+        `Event dropped due to being matched by \`ignoreErrors\` option.
+Event: ${getEventDescription(event)}`
+      );
+      return true;
+    }
+    if (_isUselessError(event)) {
+      DEBUG_BUILD && debug.warn(
+        `Event dropped due to not having an error message, error type or stacktrace.
+Event: ${getEventDescription(
+          event
+        )}`
+      );
+      return true;
+    }
+    if (_isDeniedUrl(event, options.denyUrls)) {
+      DEBUG_BUILD && debug.warn(
+        `Event dropped due to being matched by \`denyUrls\` option.
+Event: ${getEventDescription(
+          event
+        )}.
+Url: ${_getEventFilterUrl(event)}`
+      );
+      return true;
+    }
+    if (!_isAllowedUrl(event, options.allowUrls)) {
+      DEBUG_BUILD && debug.warn(
+        `Event dropped due to not being matched by \`allowUrls\` option.
+Event: ${getEventDescription(
+          event
+        )}.
+Url: ${_getEventFilterUrl(event)}`
+      );
+      return true;
+    }
+  } else if (event.type === "transaction") {
+    if (_isIgnoredTransaction(event, options.ignoreTransactions)) {
+      DEBUG_BUILD && debug.warn(
+        `Event dropped due to being matched by \`ignoreTransactions\` option.
+Event: ${getEventDescription(event)}`
+      );
+      return true;
+    }
+  }
+  return false;
+}
+function _isIgnoredError(event, ignoreErrors) {
+  if (!ignoreErrors?.length) {
+    return false;
+  }
+  return getPossibleEventMessages(event).some((message) => stringMatchesSomePattern(message, ignoreErrors));
+}
+function _isIgnoredTransaction(event, ignoreTransactions) {
+  if (!ignoreTransactions?.length) {
+    return false;
+  }
+  const name = event.transaction;
+  return name ? stringMatchesSomePattern(name, ignoreTransactions) : false;
+}
+function _isDeniedUrl(event, denyUrls) {
+  if (!denyUrls?.length) {
+    return false;
+  }
+  const url = _getEventFilterUrl(event);
+  return !url ? false : stringMatchesSomePattern(url, denyUrls);
+}
+function _isAllowedUrl(event, allowUrls) {
+  if (!allowUrls?.length) {
+    return true;
+  }
+  const url = _getEventFilterUrl(event);
+  return !url ? true : stringMatchesSomePattern(url, allowUrls);
+}
+function _getLastValidUrl(frames = []) {
+  for (let i = frames.length - 1; i >= 0; i--) {
+    const frame = frames[i];
+    if (frame && frame.filename !== "<anonymous>" && frame.filename !== "[native code]") {
+      return frame.filename || null;
+    }
+  }
+  return null;
+}
+function _getEventFilterUrl(event) {
+  try {
+    const rootException = [...event.exception?.values ?? []].reverse().find((value) => value.mechanism?.parent_id === void 0 && value.stacktrace?.frames?.length);
+    const frames = rootException?.stacktrace?.frames;
+    return frames ? _getLastValidUrl(frames) : null;
+  } catch {
+    DEBUG_BUILD && debug.error(`Cannot extract url for event ${getEventDescription(event)}`);
+    return null;
+  }
+}
+function _isUselessError(event) {
+  if (!event.exception?.values?.length) {
+    return false;
+  }
+  return (
+    // No top-level message
+    !event.message && // There are no exception values that have a stacktrace, a non-generic-Error type or value
+    !event.exception.values.some((value) => value.stacktrace || value.type && value.type !== "Error" || value.value)
+  );
+}
+
+// node_modules/@sentry/core/build/esm/utils/aggregate-errors.js
+function applyAggregateErrorsToEvent(exceptionFromErrorImplementation, parser, key, limit, event, hint) {
+  if (!event.exception?.values || !hint || !isInstanceOf(hint.originalException, Error)) {
+    return;
+  }
+  const originalException = event.exception.values.length > 0 ? event.exception.values[event.exception.values.length - 1] : void 0;
+  if (originalException) {
+    event.exception.values = aggregateExceptionsFromError(
+      exceptionFromErrorImplementation,
+      parser,
+      limit,
+      hint.originalException,
+      key,
+      event.exception.values,
+      originalException,
+      0
+    );
+  }
+}
+function aggregateExceptionsFromError(exceptionFromErrorImplementation, parser, limit, error2, key, prevExceptions, exception, exceptionId) {
+  if (prevExceptions.length >= limit + 1) {
+    return prevExceptions;
+  }
+  let newExceptions = [...prevExceptions];
+  if (isInstanceOf(error2[key], Error)) {
+    applyExceptionGroupFieldsForParentException(exception, exceptionId);
+    const newException = exceptionFromErrorImplementation(parser, error2[key]);
+    const newExceptionId = newExceptions.length;
+    applyExceptionGroupFieldsForChildException(newException, key, newExceptionId, exceptionId);
+    newExceptions = aggregateExceptionsFromError(
+      exceptionFromErrorImplementation,
+      parser,
+      limit,
+      error2[key],
+      key,
+      [newException, ...newExceptions],
+      newException,
+      newExceptionId
+    );
+  }
+  if (Array.isArray(error2.errors)) {
+    error2.errors.forEach((childError, i) => {
+      if (isInstanceOf(childError, Error)) {
+        applyExceptionGroupFieldsForParentException(exception, exceptionId);
+        const newException = exceptionFromErrorImplementation(parser, childError);
+        const newExceptionId = newExceptions.length;
+        applyExceptionGroupFieldsForChildException(newException, `errors[${i}]`, newExceptionId, exceptionId);
+        newExceptions = aggregateExceptionsFromError(
+          exceptionFromErrorImplementation,
+          parser,
+          limit,
+          childError,
+          key,
+          [newException, ...newExceptions],
+          newException,
+          newExceptionId
+        );
+      }
+    });
+  }
+  return newExceptions;
+}
+function applyExceptionGroupFieldsForParentException(exception, exceptionId) {
+  exception.mechanism = exception.mechanism || { type: "generic", handled: true };
+  exception.mechanism = {
+    ...exception.mechanism,
+    ...exception.type === "AggregateError" && { is_exception_group: true },
+    exception_id: exceptionId
+  };
+}
+function applyExceptionGroupFieldsForChildException(exception, source, exceptionId, parentId) {
+  exception.mechanism = exception.mechanism || { type: "generic", handled: true };
+  exception.mechanism = {
+    ...exception.mechanism,
+    type: "chained",
+    source,
+    exception_id: exceptionId,
+    parent_id: parentId
+  };
+}
+
+// node_modules/@sentry/core/build/esm/instrument/console.js
+function addConsoleInstrumentationHandler(handler) {
+  const type = "console";
+  addHandler(type, handler);
+  maybeInstrument(type, instrumentConsole);
+}
+function instrumentConsole() {
+  if (!("console" in GLOBAL_OBJ)) {
+    return;
+  }
+  CONSOLE_LEVELS.forEach(function(level) {
+    if (!(level in GLOBAL_OBJ.console)) {
+      return;
+    }
+    fill(GLOBAL_OBJ.console, level, function(originalConsoleMethod) {
+      originalConsoleMethods[level] = originalConsoleMethod;
+      return function(...args) {
+        const handlerData = { args, level };
+        triggerHandlers("console", handlerData);
+        const log2 = originalConsoleMethods[level];
+        log2?.apply(GLOBAL_OBJ.console, args);
+      };
+    });
+  });
+}
+
+// node_modules/@sentry/core/build/esm/utils/severity.js
+function severityLevelFromString(level) {
+  return level === "warn" ? "warning" : ["fatal", "error", "warning", "log", "info", "debug"].includes(level) ? level : "log";
+}
+
+// node_modules/@sentry/core/build/esm/integrations/captureconsole.js
+var INTEGRATION_NAME3 = "CaptureConsole";
+var _captureConsoleIntegration = ((options = {}) => {
+  const levels = options.levels || CONSOLE_LEVELS;
+  const handled = options.handled ?? true;
+  return {
+    name: INTEGRATION_NAME3,
+    setup(client) {
+      if (!("console" in GLOBAL_OBJ)) {
+        return;
+      }
+      addConsoleInstrumentationHandler(({ args, level }) => {
+        if (getClient() !== client || !levels.includes(level)) {
+          return;
+        }
+        consoleHandler(args, level, handled);
+      });
+    }
+  };
+});
+var captureConsoleIntegration = defineIntegration(_captureConsoleIntegration);
+function consoleHandler(args, level, handled) {
+  const captureContext = {
+    level: severityLevelFromString(level),
+    extra: {
+      arguments: args
+    }
+  };
+  withScope2((scope) => {
+    scope.addEventProcessor((event) => {
+      event.logger = "console";
+      addExceptionMechanism(event, {
+        handled,
+        type: "console"
+      });
+      return event;
+    });
+    if (level === "assert") {
+      if (!args[0]) {
+        const message2 = `Assertion failed: ${safeJoin(args.slice(1), " ") || "console.assert"}`;
+        scope.setExtra("arguments", args.slice(1));
+        captureMessage(message2, captureContext);
+      }
+      return;
+    }
+    const error2 = args.find((arg) => arg instanceof Error);
+    if (error2) {
+      captureException(error2, captureContext);
+      return;
+    }
+    const message = safeJoin(args, " ");
+    captureMessage(message, captureContext);
+  });
+}
+
+// node_modules/@sentry/core/build/esm/integrations/dedupe.js
+var INTEGRATION_NAME4 = "Dedupe";
+var _dedupeIntegration = (() => {
+  let previousEvent;
+  return {
+    name: INTEGRATION_NAME4,
+    processEvent(currentEvent) {
+      if (currentEvent.type) {
+        return currentEvent;
+      }
+      try {
+        if (_shouldDropEvent2(currentEvent, previousEvent)) {
+          DEBUG_BUILD && debug.warn("Event dropped due to being a duplicate of previously captured event.");
+          return null;
+        }
+      } catch {
+      }
+      return previousEvent = currentEvent;
+    }
+  };
+});
+var dedupeIntegration = defineIntegration(_dedupeIntegration);
+function _shouldDropEvent2(currentEvent, previousEvent) {
+  if (!previousEvent) {
+    return false;
+  }
+  if (_isSameMessageEvent(currentEvent, previousEvent)) {
+    return true;
+  }
+  if (_isSameExceptionEvent(currentEvent, previousEvent)) {
+    return true;
+  }
+  return false;
+}
+function _isSameMessageEvent(currentEvent, previousEvent) {
+  const currentMessage = currentEvent.message;
+  const previousMessage = previousEvent.message;
+  if (!currentMessage && !previousMessage) {
+    return false;
+  }
+  if (currentMessage && !previousMessage || !currentMessage && previousMessage) {
+    return false;
+  }
+  if (currentMessage !== previousMessage) {
+    return false;
+  }
+  if (!_isSameFingerprint(currentEvent, previousEvent)) {
+    return false;
+  }
+  if (!_isSameStacktrace(currentEvent, previousEvent)) {
+    return false;
+  }
+  return true;
+}
+function _isSameExceptionEvent(currentEvent, previousEvent) {
+  const previousException = _getExceptionFromEvent(previousEvent);
+  const currentException = _getExceptionFromEvent(currentEvent);
+  if (!previousException || !currentException) {
+    return false;
+  }
+  if (previousException.type !== currentException.type || previousException.value !== currentException.value) {
+    return false;
+  }
+  if (!_isSameFingerprint(currentEvent, previousEvent)) {
+    return false;
+  }
+  if (!_isSameStacktrace(currentEvent, previousEvent)) {
+    return false;
+  }
+  return true;
+}
+function _isSameStacktrace(currentEvent, previousEvent) {
+  let currentFrames = getFramesFromEvent(currentEvent);
+  let previousFrames = getFramesFromEvent(previousEvent);
+  if (!currentFrames && !previousFrames) {
+    return true;
+  }
+  if (currentFrames && !previousFrames || !currentFrames && previousFrames) {
+    return false;
+  }
+  currentFrames = currentFrames;
+  previousFrames = previousFrames;
+  if (previousFrames.length !== currentFrames.length) {
+    return false;
+  }
+  for (let i = 0; i < previousFrames.length; i++) {
+    const frameA = previousFrames[i];
+    const frameB = currentFrames[i];
+    if (frameA.filename !== frameB.filename || frameA.lineno !== frameB.lineno || frameA.colno !== frameB.colno || frameA.function !== frameB.function) {
+      return false;
+    }
+  }
+  return true;
+}
+function _isSameFingerprint(currentEvent, previousEvent) {
+  let currentFingerprint = currentEvent.fingerprint;
+  let previousFingerprint = previousEvent.fingerprint;
+  if (!currentFingerprint && !previousFingerprint) {
+    return true;
+  }
+  if (currentFingerprint && !previousFingerprint || !currentFingerprint && previousFingerprint) {
+    return false;
+  }
+  currentFingerprint = currentFingerprint;
+  previousFingerprint = previousFingerprint;
+  try {
+    return !!(currentFingerprint.join("") === previousFingerprint.join(""));
+  } catch {
+    return false;
+  }
+}
+function _getExceptionFromEvent(event) {
+  return event.exception?.values?.[0];
+}
+
+// node_modules/@sentry/core/build/esm/utils/url.js
+function parseUrl(url) {
+  if (!url) {
+    return {};
+  }
+  const match = url.match(/^(([^:/?#]+):)?(\/\/([^/?#]*))?([^?#]*)(\?([^#]*))?(#(.*))?$/);
+  if (!match) {
+    return {};
+  }
+  const query = match[6] || "";
+  const fragment = match[8] || "";
+  return {
+    host: match[4],
+    path: match[5],
+    protocol: match[2],
+    search: query,
+    hash: fragment,
+    relative: match[5] + query + fragment
+    // everything minus origin
+  };
+}
+
+// node_modules/@sentry/core/build/esm/utils/breadcrumb-log-level.js
+function getBreadcrumbLogLevelFromHttpStatusCode(statusCode) {
+  if (statusCode === void 0) {
+    return void 0;
+  } else if (statusCode >= 400 && statusCode < 500) {
+    return "warning";
+  } else if (statusCode >= 500) {
+    return "error";
+  } else {
+    return void 0;
+  }
+}
+
+// node_modules/@sentry/core/build/esm/utils/supports.js
+var WINDOW2 = GLOBAL_OBJ;
+function supportsHistory() {
+  return "history" in WINDOW2 && !!WINDOW2.history;
+}
+function _isFetchSupported() {
+  if (!("fetch" in WINDOW2)) {
+    return false;
+  }
+  try {
+    new Headers();
+    new Request("http://www.example.com");
+    new Response();
+    return true;
+  } catch {
+    return false;
+  }
+}
+function isNativeFunction(func) {
+  return func && /^function\s+\w+\(\)\s+\{\s+\[native code\]\s+\}$/.test(func.toString());
+}
+function supportsNativeFetch() {
+  if (typeof EdgeRuntime === "string") {
+    return true;
+  }
+  if (!_isFetchSupported()) {
+    return false;
+  }
+  if (isNativeFunction(WINDOW2.fetch)) {
+    return true;
+  }
+  let result = false;
+  const doc = WINDOW2.document;
+  if (doc && typeof doc.createElement === "function") {
+    try {
+      const sandbox = doc.createElement("iframe");
+      sandbox.hidden = true;
+      doc.head.appendChild(sandbox);
+      if (sandbox.contentWindow?.fetch) {
+        result = isNativeFunction(sandbox.contentWindow.fetch);
+      }
+      doc.head.removeChild(sandbox);
+    } catch (err) {
+      DEBUG_BUILD && debug.warn("Could not create sandbox iframe for pure fetch check, bailing to window.fetch: ", err);
+    }
+  }
+  return result;
+}
+
+// node_modules/@sentry/core/build/esm/instrument/fetch.js
+function addFetchInstrumentationHandler(handler, skipNativeFetchCheck) {
+  const type = "fetch";
+  addHandler(type, handler);
+  maybeInstrument(type, () => instrumentFetch(void 0, skipNativeFetchCheck));
+}
+function instrumentFetch(onFetchResolved, skipNativeFetchCheck = false) {
+  if (skipNativeFetchCheck && !supportsNativeFetch()) {
+    return;
+  }
+  fill(GLOBAL_OBJ, "fetch", function(originalFetch) {
+    return function(...args) {
+      const virtualError = new Error();
+      const { method, url } = parseFetchArgs(args);
+      const handlerData = {
+        args,
+        fetchData: {
+          method,
+          url
+        },
+        startTimestamp: timestampInSeconds() * 1e3,
+        // // Adding the error to be able to fingerprint the failed fetch event in HttpClient instrumentation
+        virtualError,
+        headers: getHeadersFromFetchArgs(args)
+      };
+      if (!onFetchResolved) {
+        triggerHandlers("fetch", {
+          ...handlerData
+        });
+      }
+      return originalFetch.apply(GLOBAL_OBJ, args).then(
+        async (response) => {
+          if (onFetchResolved) {
+            onFetchResolved(response);
+          } else {
+            triggerHandlers("fetch", {
+              ...handlerData,
+              endTimestamp: timestampInSeconds() * 1e3,
+              response
+            });
+          }
+          return response;
+        },
+        (error2) => {
+          triggerHandlers("fetch", {
+            ...handlerData,
+            endTimestamp: timestampInSeconds() * 1e3,
+            error: error2
+          });
+          if (isError(error2) && error2.stack === void 0) {
+            error2.stack = virtualError.stack;
+            addNonEnumerableProperty(error2, "framesToPop", 1);
+          }
+          if (error2 instanceof TypeError && (error2.message === "Failed to fetch" || error2.message === "Load failed" || error2.message === "NetworkError when attempting to fetch resource.")) {
+            try {
+              const url2 = new URL(handlerData.fetchData.url);
+              error2.message = `${error2.message} (${url2.host})`;
+            } catch {
+            }
+          }
+          throw error2;
+        }
+      );
+    };
+  });
+}
+function hasProp(obj, prop) {
+  return !!obj && typeof obj === "object" && !!obj[prop];
+}
+function getUrlFromResource(resource) {
+  if (typeof resource === "string") {
+    return resource;
+  }
+  if (!resource) {
+    return "";
+  }
+  if (hasProp(resource, "url")) {
+    return resource.url;
+  }
+  if (resource.toString) {
+    return resource.toString();
+  }
+  return "";
+}
+function parseFetchArgs(fetchArgs) {
+  if (fetchArgs.length === 0) {
+    return { method: "GET", url: "" };
+  }
+  if (fetchArgs.length === 2) {
+    const [url, options] = fetchArgs;
+    return {
+      url: getUrlFromResource(url),
+      method: hasProp(options, "method") ? String(options.method).toUpperCase() : "GET"
+    };
+  }
+  const arg = fetchArgs[0];
+  return {
+    url: getUrlFromResource(arg),
+    method: hasProp(arg, "method") ? String(arg.method).toUpperCase() : "GET"
+  };
+}
+function getHeadersFromFetchArgs(fetchArgs) {
+  const [requestArgument, optionsArgument] = fetchArgs;
+  try {
+    if (typeof optionsArgument === "object" && optionsArgument !== null && "headers" in optionsArgument && optionsArgument.headers) {
+      return new Headers(optionsArgument.headers);
+    }
+    if (isRequest(requestArgument)) {
+      return new Headers(requestArgument.headers);
+    }
+  } catch {
+  }
+  return;
+}
+
+// node_modules/@sentry/core/build/esm/utils/env.js
+function getSDKSource() {
+  return "npm";
+}
+
+// node_modules/@sentry/browser/build/npm/esm/helpers.js
+var WINDOW3 = GLOBAL_OBJ;
+var ignoreOnError = 0;
+function shouldIgnoreOnError() {
+  return ignoreOnError > 0;
+}
+function ignoreNextOnError() {
+  ignoreOnError++;
+  setTimeout(() => {
+    ignoreOnError--;
+  });
+}
+function wrap(fn, options = {}) {
+  function isFunction4(fn2) {
+    return typeof fn2 === "function";
+  }
+  if (!isFunction4(fn)) {
+    return fn;
+  }
+  try {
+    const wrapper = fn.__sentry_wrapped__;
+    if (wrapper) {
+      if (typeof wrapper === "function") {
+        return wrapper;
+      } else {
+        return fn;
+      }
+    }
+    if (getOriginalFunction(fn)) {
+      return fn;
+    }
+  } catch {
+    return fn;
+  }
+  const sentryWrapped = function(...args) {
+    try {
+      const wrappedArguments = args.map((arg) => wrap(arg, options));
+      return fn.apply(this, wrappedArguments);
+    } catch (ex) {
+      ignoreNextOnError();
+      withScope2((scope) => {
+        scope.addEventProcessor((event) => {
+          if (options.mechanism) {
+            addExceptionTypeValue(event, void 0, void 0);
+            addExceptionMechanism(event, options.mechanism);
+          }
+          event.extra = {
+            ...event.extra,
+            arguments: args
+          };
+          return event;
+        });
+        captureException(ex);
+      });
+      throw ex;
+    }
+  };
+  try {
+    for (const property in fn) {
+      if (Object.prototype.hasOwnProperty.call(fn, property)) {
+        sentryWrapped[property] = fn[property];
+      }
+    }
+  } catch {
+  }
+  markFunctionWrapped(sentryWrapped, fn);
+  addNonEnumerableProperty(fn, "__sentry_wrapped__", sentryWrapped);
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(sentryWrapped, "name");
+    if (descriptor.configurable) {
+      Object.defineProperty(sentryWrapped, "name", {
+        get() {
+          return fn.name;
+        }
+      });
+    }
+  } catch {
+  }
+  return sentryWrapped;
+}
+function getHttpRequestData() {
+  const url = getLocationHref();
+  const { referrer } = WINDOW3.document || {};
+  const { userAgent } = WINDOW3.navigator || {};
+  const headers = {
+    ...referrer && { Referer: referrer },
+    ...userAgent && { "User-Agent": userAgent }
+  };
+  const request = {
+    url,
+    headers
+  };
+  return request;
+}
+
+// node_modules/@sentry/browser/build/npm/esm/eventbuilder.js
+function exceptionFromError(stackParser, ex) {
+  const frames = parseStackFrames(stackParser, ex);
+  const exception = {
+    type: extractType(ex),
+    value: extractMessage(ex)
+  };
+  if (frames.length) {
+    exception.stacktrace = { frames };
+  }
+  if (exception.type === void 0 && exception.value === "") {
+    exception.value = "Unrecoverable error caught";
+  }
+  return exception;
+}
+function eventFromPlainObject(stackParser, exception, syntheticException, isUnhandledRejection) {
+  const client = getClient();
+  const normalizeDepth = client?.getOptions().normalizeDepth;
+  const errorFromProp = getErrorPropertyFromObject(exception);
+  const extra = {
+    __serialized__: normalizeToSize(exception, normalizeDepth)
+  };
+  if (errorFromProp) {
+    return {
+      exception: {
+        values: [exceptionFromError(stackParser, errorFromProp)]
+      },
+      extra
+    };
+  }
+  const event = {
+    exception: {
+      values: [
+        {
+          type: isEvent(exception) ? exception.constructor.name : isUnhandledRejection ? "UnhandledRejection" : "Error",
+          value: getNonErrorObjectExceptionValue(exception, { isUnhandledRejection })
+        }
+      ]
+    },
+    extra
+  };
+  if (syntheticException) {
+    const frames = parseStackFrames(stackParser, syntheticException);
+    if (frames.length) {
+      event.exception.values[0].stacktrace = { frames };
+    }
+  }
+  return event;
+}
+function eventFromError(stackParser, ex) {
+  return {
+    exception: {
+      values: [exceptionFromError(stackParser, ex)]
+    }
+  };
+}
+function parseStackFrames(stackParser, ex) {
+  const stacktrace = ex.stacktrace || ex.stack || "";
+  const skipLines = getSkipFirstStackStringLines(ex);
+  const framesToPop = getPopFirstTopFrames(ex);
+  try {
+    return stackParser(stacktrace, skipLines, framesToPop);
+  } catch {
+  }
+  return [];
+}
+var reactMinifiedRegexp = /Minified React error #\d+;/i;
+function getSkipFirstStackStringLines(ex) {
+  if (ex && reactMinifiedRegexp.test(ex.message)) {
+    return 1;
+  }
+  return 0;
+}
+function getPopFirstTopFrames(ex) {
+  if (typeof ex.framesToPop === "number") {
+    return ex.framesToPop;
+  }
+  return 0;
+}
+function isWebAssemblyException(exception) {
+  if (typeof WebAssembly !== "undefined" && typeof WebAssembly.Exception !== "undefined") {
+    return exception instanceof WebAssembly.Exception;
+  } else {
+    return false;
+  }
+}
+function extractType(ex) {
+  const name = ex?.name;
+  if (!name && isWebAssemblyException(ex)) {
+    const hasTypeInMessage = ex.message && Array.isArray(ex.message) && ex.message.length == 2;
+    return hasTypeInMessage ? ex.message[0] : "WebAssembly.Exception";
+  }
+  return name;
+}
+function extractMessage(ex) {
+  const message = ex?.message;
+  if (isWebAssemblyException(ex)) {
+    if (Array.isArray(ex.message) && ex.message.length == 2) {
+      return ex.message[1];
+    }
+    return "wasm exception";
+  }
+  if (!message) {
+    return "No error message";
+  }
+  if (message.error && typeof message.error.message === "string") {
+    return message.error.message;
+  }
+  return message;
+}
+function eventFromException(stackParser, exception, hint, attachStacktrace) {
+  const syntheticException = hint?.syntheticException || void 0;
+  const event = eventFromUnknownInput(stackParser, exception, syntheticException, attachStacktrace);
+  addExceptionMechanism(event);
+  event.level = "error";
+  if (hint?.event_id) {
+    event.event_id = hint.event_id;
+  }
+  return resolvedSyncPromise(event);
+}
+function eventFromMessage(stackParser, message, level = "info", hint, attachStacktrace) {
+  const syntheticException = hint?.syntheticException || void 0;
+  const event = eventFromString(stackParser, message, syntheticException, attachStacktrace);
+  event.level = level;
+  if (hint?.event_id) {
+    event.event_id = hint.event_id;
+  }
+  return resolvedSyncPromise(event);
+}
+function eventFromUnknownInput(stackParser, exception, syntheticException, attachStacktrace, isUnhandledRejection) {
+  let event;
+  if (isErrorEvent(exception) && exception.error) {
+    const errorEvent = exception;
+    return eventFromError(stackParser, errorEvent.error);
+  }
+  if (isDOMError(exception) || isDOMException(exception)) {
+    const domException = exception;
+    if ("stack" in exception) {
+      event = eventFromError(stackParser, exception);
+    } else {
+      const name = domException.name || (isDOMError(domException) ? "DOMError" : "DOMException");
+      const message = domException.message ? `${name}: ${domException.message}` : name;
+      event = eventFromString(stackParser, message, syntheticException, attachStacktrace);
+      addExceptionTypeValue(event, message);
+    }
+    if ("code" in domException) {
+      event.tags = { ...event.tags, "DOMException.code": `${domException.code}` };
+    }
+    return event;
+  }
+  if (isError(exception)) {
+    return eventFromError(stackParser, exception);
+  }
+  if (isPlainObject(exception) || isEvent(exception)) {
+    const objectException = exception;
+    event = eventFromPlainObject(stackParser, objectException, syntheticException, isUnhandledRejection);
+    addExceptionMechanism(event, {
+      synthetic: true
+    });
+    return event;
+  }
+  event = eventFromString(stackParser, exception, syntheticException, attachStacktrace);
+  addExceptionTypeValue(event, `${exception}`, void 0);
+  addExceptionMechanism(event, {
+    synthetic: true
+  });
+  return event;
+}
+function eventFromString(stackParser, message, syntheticException, attachStacktrace) {
+  const event = {};
+  if (attachStacktrace && syntheticException) {
+    const frames = parseStackFrames(stackParser, syntheticException);
+    if (frames.length) {
+      event.exception = {
+        values: [{ value: message, stacktrace: { frames } }]
+      };
+    }
+    addExceptionMechanism(event, { synthetic: true });
+  }
+  if (isParameterizedString(message)) {
+    const { __sentry_template_string__, __sentry_template_values__ } = message;
+    event.logentry = {
+      message: __sentry_template_string__,
+      params: __sentry_template_values__
+    };
+    return event;
+  }
+  event.message = message;
+  return event;
+}
+function getNonErrorObjectExceptionValue(exception, { isUnhandledRejection }) {
+  const keys = extractExceptionKeysForMessage(exception);
+  const captureType = isUnhandledRejection ? "promise rejection" : "exception";
+  if (isErrorEvent(exception)) {
+    return `Event \`ErrorEvent\` captured as ${captureType} with message \`${exception.message}\``;
+  }
+  if (isEvent(exception)) {
+    const className = getObjectClassName(exception);
+    return `Event \`${className}\` (type=${exception.type}) captured as ${captureType}`;
+  }
+  return `Object captured as ${captureType} with keys: ${keys}`;
+}
+function getObjectClassName(obj) {
+  try {
+    const prototype3 = Object.getPrototypeOf(obj);
+    return prototype3 ? prototype3.constructor.name : void 0;
+  } catch {
+  }
+}
+function getErrorPropertyFromObject(obj) {
+  for (const prop in obj) {
+    if (Object.prototype.hasOwnProperty.call(obj, prop)) {
+      const value = obj[prop];
+      if (value instanceof Error) {
+        return value;
+      }
+    }
+  }
+  return void 0;
+}
+
+// node_modules/@sentry/browser/build/npm/esm/client.js
+var DEFAULT_FLUSH_INTERVAL = 5e3;
+var BrowserClient = class extends Client {
+  /**
+   * Creates a new Browser SDK instance.
+   *
+   * @param options Configuration options for this SDK.
+   */
+  constructor(options) {
+    const opts = applyDefaultOptions(options);
+    const sdkSource = WINDOW3.SENTRY_SDK_SOURCE || getSDKSource();
+    applySdkMetadata(opts, "browser", ["browser"], sdkSource);
+    super(opts);
+    const { sendDefaultPii, sendClientReports, enableLogs, _experiments } = this._options;
+    const shouldEnableLogs = enableLogs ?? _experiments?.enableLogs;
+    if (WINDOW3.document && (sendClientReports || shouldEnableLogs)) {
+      WINDOW3.document.addEventListener("visibilitychange", () => {
+        if (WINDOW3.document.visibilityState === "hidden") {
+          if (sendClientReports) {
+            this._flushOutcomes();
+          }
+          if (shouldEnableLogs) {
+            _INTERNAL_flushLogsBuffer(this);
+          }
+        }
+      });
+    }
+    if (shouldEnableLogs) {
+      this.on("flush", () => {
+        _INTERNAL_flushLogsBuffer(this);
+      });
+      this.on("afterCaptureLog", () => {
+        if (this._logFlushIdleTimeout) {
+          clearTimeout(this._logFlushIdleTimeout);
+        }
+        this._logFlushIdleTimeout = setTimeout(() => {
+          _INTERNAL_flushLogsBuffer(this);
+        }, DEFAULT_FLUSH_INTERVAL);
+      });
+    }
+    if (sendDefaultPii) {
+      this.on("postprocessEvent", addAutoIpAddressToUser);
+      this.on("beforeSendSession", addAutoIpAddressToSession);
+    }
+  }
+  /**
+   * @inheritDoc
+   */
+  eventFromException(exception, hint) {
+    return eventFromException(this._options.stackParser, exception, hint, this._options.attachStacktrace);
+  }
+  /**
+   * @inheritDoc
+   */
+  eventFromMessage(message, level = "info", hint) {
+    return eventFromMessage(this._options.stackParser, message, level, hint, this._options.attachStacktrace);
+  }
+  /**
+   * @inheritDoc
+   */
+  _prepareEvent(event, hint, currentScope, isolationScope) {
+    event.platform = event.platform || "javascript";
+    return super._prepareEvent(event, hint, currentScope, isolationScope);
+  }
+};
+function applyDefaultOptions(optionsArg) {
+  return {
+    release: typeof __SENTRY_RELEASE__ === "string" ? __SENTRY_RELEASE__ : WINDOW3.SENTRY_RELEASE?.id,
+    // This supports the variable that sentry-webpack-plugin injects
+    sendClientReports: true,
+    // We default this to true, as it is the safer scenario
+    parentSpanIsAlwaysRootSpan: true,
+    ...optionsArg
+  };
+}
+
+// node_modules/@sentry-internal/browser-utils/build/esm/debug-build.js
+var DEBUG_BUILD2 = typeof __SENTRY_DEBUG__ === "undefined" || __SENTRY_DEBUG__;
+
+// node_modules/@sentry-internal/browser-utils/build/esm/types.js
+var WINDOW4 = GLOBAL_OBJ;
+
+// node_modules/@sentry-internal/browser-utils/build/esm/instrument/dom.js
+var DEBOUNCE_DURATION = 1e3;
+var debounceTimerID;
+var lastCapturedEventType;
+var lastCapturedEventTargetId;
+function addClickKeypressInstrumentationHandler(handler) {
+  const type = "dom";
+  addHandler(type, handler);
+  maybeInstrument(type, instrumentDOM);
+}
+function instrumentDOM() {
+  if (!WINDOW4.document) {
+    return;
+  }
+  const triggerDOMHandler = triggerHandlers.bind(null, "dom");
+  const globalDOMEventHandler = makeDOMEventHandler(triggerDOMHandler, true);
+  WINDOW4.document.addEventListener("click", globalDOMEventHandler, false);
+  WINDOW4.document.addEventListener("keypress", globalDOMEventHandler, false);
+  ["EventTarget", "Node"].forEach((target) => {
+    const globalObject = WINDOW4;
+    const proto = globalObject[target]?.prototype;
+    if (!proto?.hasOwnProperty?.("addEventListener")) {
+      return;
+    }
+    fill(proto, "addEventListener", function(originalAddEventListener) {
+      return function(type, listener, options) {
+        if (type === "click" || type == "keypress") {
+          try {
+            const handlers2 = this.__sentry_instrumentation_handlers__ = this.__sentry_instrumentation_handlers__ || {};
+            const handlerForType = handlers2[type] = handlers2[type] || { refCount: 0 };
+            if (!handlerForType.handler) {
+              const handler = makeDOMEventHandler(triggerDOMHandler);
+              handlerForType.handler = handler;
+              originalAddEventListener.call(this, type, handler, options);
+            }
+            handlerForType.refCount++;
+          } catch {
+          }
+        }
+        return originalAddEventListener.call(this, type, listener, options);
+      };
+    });
+    fill(
+      proto,
+      "removeEventListener",
+      function(originalRemoveEventListener) {
+        return function(type, listener, options) {
+          if (type === "click" || type == "keypress") {
+            try {
+              const handlers2 = this.__sentry_instrumentation_handlers__ || {};
+              const handlerForType = handlers2[type];
+              if (handlerForType) {
+                handlerForType.refCount--;
+                if (handlerForType.refCount <= 0) {
+                  originalRemoveEventListener.call(this, type, handlerForType.handler, options);
+                  handlerForType.handler = void 0;
+                  delete handlers2[type];
+                }
+                if (Object.keys(handlers2).length === 0) {
+                  delete this.__sentry_instrumentation_handlers__;
+                }
+              }
+            } catch {
+            }
+          }
+          return originalRemoveEventListener.call(this, type, listener, options);
+        };
+      }
+    );
+  });
+}
+function isSimilarToLastCapturedEvent(event) {
+  if (event.type !== lastCapturedEventType) {
+    return false;
+  }
+  try {
+    if (!event.target || event.target._sentryId !== lastCapturedEventTargetId) {
+      return false;
+    }
+  } catch {
+  }
+  return true;
+}
+function shouldSkipDOMEvent(eventType, target) {
+  if (eventType !== "keypress") {
+    return false;
+  }
+  if (!target?.tagName) {
+    return true;
+  }
+  if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
+    return false;
+  }
+  return true;
+}
+function makeDOMEventHandler(handler, globalListener = false) {
+  return (event) => {
+    if (!event || event["_sentryCaptured"]) {
+      return;
+    }
+    const target = getEventTarget(event);
+    if (shouldSkipDOMEvent(event.type, target)) {
+      return;
+    }
+    addNonEnumerableProperty(event, "_sentryCaptured", true);
+    if (target && !target._sentryId) {
+      addNonEnumerableProperty(target, "_sentryId", uuid4());
+    }
+    const name = event.type === "keypress" ? "input" : event.type;
+    if (!isSimilarToLastCapturedEvent(event)) {
+      const handlerData = { event, name, global: globalListener };
+      handler(handlerData);
+      lastCapturedEventType = event.type;
+      lastCapturedEventTargetId = target ? target._sentryId : void 0;
+    }
+    clearTimeout(debounceTimerID);
+    debounceTimerID = WINDOW4.setTimeout(() => {
+      lastCapturedEventTargetId = void 0;
+      lastCapturedEventType = void 0;
+    }, DEBOUNCE_DURATION);
+  };
+}
+function getEventTarget(event) {
+  try {
+    return event.target;
+  } catch {
+    return null;
+  }
+}
+
+// node_modules/@sentry-internal/browser-utils/build/esm/instrument/history.js
+var lastHref;
+function addHistoryInstrumentationHandler(handler) {
+  const type = "history";
+  addHandler(type, handler);
+  maybeInstrument(type, instrumentHistory);
+}
+function instrumentHistory() {
+  WINDOW4.addEventListener("popstate", () => {
+    const to = WINDOW4.location.href;
+    const from = lastHref;
+    lastHref = to;
+    if (from === to) {
+      return;
+    }
+    const handlerData = { from, to };
+    triggerHandlers("history", handlerData);
+  });
+  if (!supportsHistory()) {
+    return;
+  }
+  function historyReplacementFunction(originalHistoryFunction) {
+    return function(...args) {
+      const url = args.length > 2 ? args[2] : void 0;
+      if (url) {
+        const from = lastHref;
+        const to = getAbsoluteUrl(String(url));
+        lastHref = to;
+        if (from === to) {
+          return originalHistoryFunction.apply(this, args);
+        }
+        const handlerData = { from, to };
+        triggerHandlers("history", handlerData);
+      }
+      return originalHistoryFunction.apply(this, args);
+    };
+  }
+  fill(WINDOW4.history, "pushState", historyReplacementFunction);
+  fill(WINDOW4.history, "replaceState", historyReplacementFunction);
+}
+function getAbsoluteUrl(urlOrPath) {
+  try {
+    const url = new URL(urlOrPath, WINDOW4.location.origin);
+    return url.toString();
+  } catch {
+    return urlOrPath;
+  }
+}
+
+// node_modules/@sentry-internal/browser-utils/build/esm/getNativeImplementation.js
+var cachedImplementations = {};
+function getNativeImplementation(name) {
+  const cached = cachedImplementations[name];
+  if (cached) {
+    return cached;
+  }
+  let impl = WINDOW4[name];
+  if (isNativeFunction(impl)) {
+    return cachedImplementations[name] = impl.bind(WINDOW4);
+  }
+  const document2 = WINDOW4.document;
+  if (document2 && typeof document2.createElement === "function") {
+    try {
+      const sandbox = document2.createElement("iframe");
+      sandbox.hidden = true;
+      document2.head.appendChild(sandbox);
+      const contentWindow = sandbox.contentWindow;
+      if (contentWindow?.[name]) {
+        impl = contentWindow[name];
+      }
+      document2.head.removeChild(sandbox);
+    } catch (e) {
+      DEBUG_BUILD2 && debug.warn(`Could not create sandbox iframe for ${name} check, bailing to window.${name}: `, e);
+    }
+  }
+  if (!impl) {
+    return impl;
+  }
+  return cachedImplementations[name] = impl.bind(WINDOW4);
+}
+function clearCachedImplementation(name) {
+  cachedImplementations[name] = void 0;
+}
+
+// node_modules/@sentry-internal/browser-utils/build/esm/instrument/xhr.js
+var SENTRY_XHR_DATA_KEY = "__sentry_xhr_v3__";
+function addXhrInstrumentationHandler(handler) {
+  const type = "xhr";
+  addHandler(type, handler);
+  maybeInstrument(type, instrumentXHR);
+}
+function instrumentXHR() {
+  if (!WINDOW4.XMLHttpRequest) {
+    return;
+  }
+  const xhrproto = XMLHttpRequest.prototype;
+  xhrproto.open = new Proxy(xhrproto.open, {
+    apply(originalOpen, xhrOpenThisArg, xhrOpenArgArray) {
+      const virtualError = new Error();
+      const startTimestamp = timestampInSeconds() * 1e3;
+      const method = isString(xhrOpenArgArray[0]) ? xhrOpenArgArray[0].toUpperCase() : void 0;
+      const url = parseXhrUrlArg(xhrOpenArgArray[1]);
+      if (!method || !url) {
+        return originalOpen.apply(xhrOpenThisArg, xhrOpenArgArray);
+      }
+      xhrOpenThisArg[SENTRY_XHR_DATA_KEY] = {
+        method,
+        url,
+        request_headers: {}
+      };
+      if (method === "POST" && url.match(/sentry_key/)) {
+        xhrOpenThisArg.__sentry_own_request__ = true;
+      }
+      const onreadystatechangeHandler = () => {
+        const xhrInfo = xhrOpenThisArg[SENTRY_XHR_DATA_KEY];
+        if (!xhrInfo) {
+          return;
+        }
+        if (xhrOpenThisArg.readyState === 4) {
+          try {
+            xhrInfo.status_code = xhrOpenThisArg.status;
+          } catch {
+          }
+          const handlerData = {
+            endTimestamp: timestampInSeconds() * 1e3,
+            startTimestamp,
+            xhr: xhrOpenThisArg,
+            virtualError
+          };
+          triggerHandlers("xhr", handlerData);
+        }
+      };
+      if ("onreadystatechange" in xhrOpenThisArg && typeof xhrOpenThisArg.onreadystatechange === "function") {
+        xhrOpenThisArg.onreadystatechange = new Proxy(xhrOpenThisArg.onreadystatechange, {
+          apply(originalOnreadystatechange, onreadystatechangeThisArg, onreadystatechangeArgArray) {
+            onreadystatechangeHandler();
+            return originalOnreadystatechange.apply(onreadystatechangeThisArg, onreadystatechangeArgArray);
+          }
+        });
+      } else {
+        xhrOpenThisArg.addEventListener("readystatechange", onreadystatechangeHandler);
+      }
+      xhrOpenThisArg.setRequestHeader = new Proxy(xhrOpenThisArg.setRequestHeader, {
+        apply(originalSetRequestHeader, setRequestHeaderThisArg, setRequestHeaderArgArray) {
+          const [header, value] = setRequestHeaderArgArray;
+          const xhrInfo = setRequestHeaderThisArg[SENTRY_XHR_DATA_KEY];
+          if (xhrInfo && isString(header) && isString(value)) {
+            xhrInfo.request_headers[header.toLowerCase()] = value;
+          }
+          return originalSetRequestHeader.apply(setRequestHeaderThisArg, setRequestHeaderArgArray);
+        }
+      });
+      return originalOpen.apply(xhrOpenThisArg, xhrOpenArgArray);
+    }
+  });
+  xhrproto.send = new Proxy(xhrproto.send, {
+    apply(originalSend, sendThisArg, sendArgArray) {
+      const sentryXhrData = sendThisArg[SENTRY_XHR_DATA_KEY];
+      if (!sentryXhrData) {
+        return originalSend.apply(sendThisArg, sendArgArray);
+      }
+      if (sendArgArray[0] !== void 0) {
+        sentryXhrData.body = sendArgArray[0];
+      }
+      const handlerData = {
+        startTimestamp: timestampInSeconds() * 1e3,
+        xhr: sendThisArg
+      };
+      triggerHandlers("xhr", handlerData);
+      return originalSend.apply(sendThisArg, sendArgArray);
+    }
+  });
+}
+function parseXhrUrlArg(url) {
+  if (isString(url)) {
+    return url;
+  }
+  try {
+    return url.toString();
+  } catch {
+  }
+  return void 0;
+}
+
+// node_modules/@sentry/browser/build/npm/esm/transports/fetch.js
+function makeFetchTransport(options, nativeFetch = getNativeImplementation("fetch")) {
+  let pendingBodySize = 0;
+  let pendingCount = 0;
+  function makeRequest(request) {
+    const requestSize = request.body.length;
+    pendingBodySize += requestSize;
+    pendingCount++;
+    const requestOptions = {
+      body: request.body,
+      method: "POST",
+      referrerPolicy: "strict-origin",
+      headers: options.headers,
+      // Outgoing requests are usually cancelled when navigating to a different page, causing a "TypeError: Failed to
+      // fetch" error and sending a "network_error" client-outcome - in Chrome, the request status shows "(cancelled)".
+      // The `keepalive` flag keeps outgoing requests alive, even when switching pages. We want this since we're
+      // frequently sending events right before the user is switching pages (eg. when finishing navigation transactions).
+      // Gotchas:
+      // - `keepalive` isn't supported by Firefox
+      // - As per spec (https://fetch.spec.whatwg.org/#http-network-or-cache-fetch):
+      //   If the sum of contentLength and inflightKeepaliveBytes is greater than 64 kibibytes, then return a network error.
+      //   We will therefore only activate the flag when we're below that limit.
+      // There is also a limit of requests that can be open at the same time, so we also limit this to 15
+      // See https://github.com/getsentry/sentry-javascript/pull/7553 for details
+      keepalive: pendingBodySize <= 6e4 && pendingCount < 15,
+      ...options.fetchOptions
+    };
+    if (!nativeFetch) {
+      clearCachedImplementation("fetch");
+      return rejectedSyncPromise("No fetch implementation available");
+    }
+    try {
+      return nativeFetch(options.url, requestOptions).then((response) => {
+        pendingBodySize -= requestSize;
+        pendingCount--;
+        return {
+          statusCode: response.status,
+          headers: {
+            "x-sentry-rate-limits": response.headers.get("X-Sentry-Rate-Limits"),
+            "retry-after": response.headers.get("Retry-After")
+          }
+        };
+      });
+    } catch (e) {
+      clearCachedImplementation("fetch");
+      pendingBodySize -= requestSize;
+      pendingCount--;
+      return rejectedSyncPromise(e);
+    }
+  }
+  return createTransport(options, makeRequest);
+}
+
+// node_modules/@sentry/browser/build/npm/esm/stack-parsers.js
+var CHROME_PRIORITY = 30;
+var GECKO_PRIORITY = 50;
+function createFrame(filename, func, lineno, colno) {
+  const frame = {
+    filename,
+    function: func === "<anonymous>" ? UNKNOWN_FUNCTION : func,
+    in_app: true
+    // All browser frames are considered in_app
+  };
+  if (lineno !== void 0) {
+    frame.lineno = lineno;
+  }
+  if (colno !== void 0) {
+    frame.colno = colno;
+  }
+  return frame;
+}
+var chromeRegexNoFnName = /^\s*at (\S+?)(?::(\d+))(?::(\d+))\s*$/i;
+var chromeRegex = /^\s*at (?:(.+?\)(?: \[.+\])?|.*?) ?\((?:address at )?)?(?:async )?((?:<anonymous>|[-a-z]+:|.*bundle|\/)?.*?)(?::(\d+))?(?::(\d+))?\)?\s*$/i;
+var chromeEvalRegex = /\((\S*)(?::(\d+))(?::(\d+))\)/;
+var chromeStackParserFn = (line) => {
+  const noFnParts = chromeRegexNoFnName.exec(line);
+  if (noFnParts) {
+    const [, filename, line2, col] = noFnParts;
+    return createFrame(filename, UNKNOWN_FUNCTION, +line2, +col);
+  }
+  const parts = chromeRegex.exec(line);
+  if (parts) {
+    const isEval = parts[2] && parts[2].indexOf("eval") === 0;
+    if (isEval) {
+      const subMatch = chromeEvalRegex.exec(parts[2]);
+      if (subMatch) {
+        parts[2] = subMatch[1];
+        parts[3] = subMatch[2];
+        parts[4] = subMatch[3];
+      }
+    }
+    const [func, filename] = extractSafariExtensionDetails(parts[1] || UNKNOWN_FUNCTION, parts[2]);
+    return createFrame(filename, func, parts[3] ? +parts[3] : void 0, parts[4] ? +parts[4] : void 0);
+  }
+  return;
+};
+var chromeStackLineParser = [CHROME_PRIORITY, chromeStackParserFn];
+var geckoREgex = /^\s*(.*?)(?:\((.*?)\))?(?:^|@)?((?:[-a-z]+)?:\/.*?|\[native code\]|[^@]*(?:bundle|\d+\.js)|\/[\w\-. /=]+)(?::(\d+))?(?::(\d+))?\s*$/i;
+var geckoEvalRegex = /(\S+) line (\d+)(?: > eval line \d+)* > eval/i;
+var gecko = (line) => {
+  const parts = geckoREgex.exec(line);
+  if (parts) {
+    const isEval = parts[3] && parts[3].indexOf(" > eval") > -1;
+    if (isEval) {
+      const subMatch = geckoEvalRegex.exec(parts[3]);
+      if (subMatch) {
+        parts[1] = parts[1] || "eval";
+        parts[3] = subMatch[1];
+        parts[4] = subMatch[2];
+        parts[5] = "";
+      }
+    }
+    let filename = parts[3];
+    let func = parts[1] || UNKNOWN_FUNCTION;
+    [func, filename] = extractSafariExtensionDetails(func, filename);
+    return createFrame(filename, func, parts[4] ? +parts[4] : void 0, parts[5] ? +parts[5] : void 0);
+  }
+  return;
+};
+var geckoStackLineParser = [GECKO_PRIORITY, gecko];
+var defaultStackLineParsers = [chromeStackLineParser, geckoStackLineParser];
+var defaultStackParser = createStackParser(...defaultStackLineParsers);
+var extractSafariExtensionDetails = (func, filename) => {
+  const isSafariExtension = func.indexOf("safari-extension") !== -1;
+  const isSafariWebExtension = func.indexOf("safari-web-extension") !== -1;
+  return isSafariExtension || isSafariWebExtension ? [
+    func.indexOf("@") !== -1 ? func.split("@")[0] : UNKNOWN_FUNCTION,
+    isSafariExtension ? `safari-extension:${filename}` : `safari-web-extension:${filename}`
+  ] : [func, filename];
+};
+
+// node_modules/@sentry/browser/build/npm/esm/debug-build.js
+var DEBUG_BUILD3 = typeof __SENTRY_DEBUG__ === "undefined" || __SENTRY_DEBUG__;
+
+// node_modules/@sentry/browser/build/npm/esm/integrations/breadcrumbs.js
+var MAX_ALLOWED_STRING_LENGTH = 1024;
+var INTEGRATION_NAME5 = "Breadcrumbs";
+var _breadcrumbsIntegration = ((options = {}) => {
+  const _options = {
+    console: true,
+    dom: true,
+    fetch: true,
+    history: true,
+    sentry: true,
+    xhr: true,
+    ...options
+  };
+  return {
+    name: INTEGRATION_NAME5,
+    setup(client) {
+      if (_options.console) {
+        addConsoleInstrumentationHandler(_getConsoleBreadcrumbHandler(client));
+      }
+      if (_options.dom) {
+        addClickKeypressInstrumentationHandler(_getDomBreadcrumbHandler(client, _options.dom));
+      }
+      if (_options.xhr) {
+        addXhrInstrumentationHandler(_getXhrBreadcrumbHandler(client));
+      }
+      if (_options.fetch) {
+        addFetchInstrumentationHandler(_getFetchBreadcrumbHandler(client));
+      }
+      if (_options.history) {
+        addHistoryInstrumentationHandler(_getHistoryBreadcrumbHandler(client));
+      }
+      if (_options.sentry) {
+        client.on("beforeSendEvent", _getSentryBreadcrumbHandler(client));
+      }
+    }
+  };
+});
+var breadcrumbsIntegration = defineIntegration(_breadcrumbsIntegration);
+function _getSentryBreadcrumbHandler(client) {
+  return function addSentryBreadcrumb(event) {
+    if (getClient() !== client) {
+      return;
+    }
+    addBreadcrumb(
+      {
+        category: `sentry.${event.type === "transaction" ? "transaction" : "event"}`,
+        event_id: event.event_id,
+        level: event.level,
+        message: getEventDescription(event)
+      },
+      {
+        event
+      }
+    );
+  };
+}
+function _getDomBreadcrumbHandler(client, dom) {
+  return function _innerDomBreadcrumb(handlerData) {
+    if (getClient() !== client) {
+      return;
+    }
+    let target;
+    let componentName;
+    let keyAttrs = typeof dom === "object" ? dom.serializeAttribute : void 0;
+    let maxStringLength = typeof dom === "object" && typeof dom.maxStringLength === "number" ? dom.maxStringLength : void 0;
+    if (maxStringLength && maxStringLength > MAX_ALLOWED_STRING_LENGTH) {
+      DEBUG_BUILD3 && debug.warn(
+        `\`dom.maxStringLength\` cannot exceed ${MAX_ALLOWED_STRING_LENGTH}, but a value of ${maxStringLength} was configured. Sentry will use ${MAX_ALLOWED_STRING_LENGTH} instead.`
+      );
+      maxStringLength = MAX_ALLOWED_STRING_LENGTH;
+    }
+    if (typeof keyAttrs === "string") {
+      keyAttrs = [keyAttrs];
+    }
+    try {
+      const event = handlerData.event;
+      const element = _isEvent(event) ? event.target : event;
+      target = htmlTreeAsString(element, { keyAttrs, maxStringLength });
+      componentName = getComponentName(element);
+    } catch {
+      target = "<unknown>";
+    }
+    if (target.length === 0) {
+      return;
+    }
+    const breadcrumb = {
+      category: `ui.${handlerData.name}`,
+      message: target
+    };
+    if (componentName) {
+      breadcrumb.data = { "ui.component_name": componentName };
+    }
+    addBreadcrumb(breadcrumb, {
+      event: handlerData.event,
+      name: handlerData.name,
+      global: handlerData.global
+    });
+  };
+}
+function _getConsoleBreadcrumbHandler(client) {
+  return function _consoleBreadcrumb(handlerData) {
+    if (getClient() !== client) {
+      return;
+    }
+    const breadcrumb = {
+      category: "console",
+      data: {
+        arguments: handlerData.args,
+        logger: "console"
+      },
+      level: severityLevelFromString(handlerData.level),
+      message: safeJoin(handlerData.args, " ")
+    };
+    if (handlerData.level === "assert") {
+      if (handlerData.args[0] === false) {
+        breadcrumb.message = `Assertion failed: ${safeJoin(handlerData.args.slice(1), " ") || "console.assert"}`;
+        breadcrumb.data.arguments = handlerData.args.slice(1);
+      } else {
+        return;
+      }
+    }
+    addBreadcrumb(breadcrumb, {
+      input: handlerData.args,
+      level: handlerData.level
+    });
+  };
+}
+function _getXhrBreadcrumbHandler(client) {
+  return function _xhrBreadcrumb(handlerData) {
+    if (getClient() !== client) {
+      return;
+    }
+    const { startTimestamp, endTimestamp } = handlerData;
+    const sentryXhrData = handlerData.xhr[SENTRY_XHR_DATA_KEY];
+    if (!startTimestamp || !endTimestamp || !sentryXhrData) {
+      return;
+    }
+    const { method, url, status_code, body } = sentryXhrData;
+    const data = {
+      method,
+      url,
+      status_code
+    };
+    const hint = {
+      xhr: handlerData.xhr,
+      input: body,
+      startTimestamp,
+      endTimestamp
+    };
+    const breadcrumb = {
+      category: "xhr",
+      data,
+      type: "http",
+      level: getBreadcrumbLogLevelFromHttpStatusCode(status_code)
+    };
+    client.emit("beforeOutgoingRequestBreadcrumb", breadcrumb, hint);
+    addBreadcrumb(breadcrumb, hint);
+  };
+}
+function _getFetchBreadcrumbHandler(client) {
+  return function _fetchBreadcrumb(handlerData) {
+    if (getClient() !== client) {
+      return;
+    }
+    const { startTimestamp, endTimestamp } = handlerData;
+    if (!endTimestamp) {
+      return;
+    }
+    if (handlerData.fetchData.url.match(/sentry_key/) && handlerData.fetchData.method === "POST") {
+      return;
+    }
+    ({
+      method: handlerData.fetchData.method,
+      url: handlerData.fetchData.url
+    });
+    if (handlerData.error) {
+      const data = handlerData.fetchData;
+      const hint = {
+        data: handlerData.error,
+        input: handlerData.args,
+        startTimestamp,
+        endTimestamp
+      };
+      const breadcrumb = {
+        category: "fetch",
+        data,
+        level: "error",
+        type: "http"
+      };
+      client.emit("beforeOutgoingRequestBreadcrumb", breadcrumb, hint);
+      addBreadcrumb(breadcrumb, hint);
+    } else {
+      const response = handlerData.response;
+      const data = {
+        ...handlerData.fetchData,
+        status_code: response?.status
+      };
+      handlerData.fetchData.request_body_size;
+      handlerData.fetchData.response_body_size;
+      response?.status;
+      const hint = {
+        input: handlerData.args,
+        response,
+        startTimestamp,
+        endTimestamp
+      };
+      const breadcrumb = {
+        category: "fetch",
+        data,
+        type: "http",
+        level: getBreadcrumbLogLevelFromHttpStatusCode(data.status_code)
+      };
+      client.emit("beforeOutgoingRequestBreadcrumb", breadcrumb, hint);
+      addBreadcrumb(breadcrumb, hint);
+    }
+  };
+}
+function _getHistoryBreadcrumbHandler(client) {
+  return function _historyBreadcrumb(handlerData) {
+    if (getClient() !== client) {
+      return;
+    }
+    let from = handlerData.from;
+    let to = handlerData.to;
+    const parsedLoc = parseUrl(WINDOW3.location.href);
+    let parsedFrom = from ? parseUrl(from) : void 0;
+    const parsedTo = parseUrl(to);
+    if (!parsedFrom?.path) {
+      parsedFrom = parsedLoc;
+    }
+    if (parsedLoc.protocol === parsedTo.protocol && parsedLoc.host === parsedTo.host) {
+      to = parsedTo.relative;
+    }
+    if (parsedLoc.protocol === parsedFrom.protocol && parsedLoc.host === parsedFrom.host) {
+      from = parsedFrom.relative;
+    }
+    addBreadcrumb({
+      category: "navigation",
+      data: {
+        from,
+        to
+      }
+    });
+  };
+}
+function _isEvent(event) {
+  return !!event && !!event.target;
+}
+
+// node_modules/@sentry/browser/build/npm/esm/integrations/browserapierrors.js
+var DEFAULT_EVENT_TARGET = [
+  "EventTarget",
+  "Window",
+  "Node",
+  "ApplicationCache",
+  "AudioTrackList",
+  "BroadcastChannel",
+  "ChannelMergerNode",
+  "CryptoOperation",
+  "EventSource",
+  "FileReader",
+  "HTMLUnknownElement",
+  "IDBDatabase",
+  "IDBRequest",
+  "IDBTransaction",
+  "KeyOperation",
+  "MediaController",
+  "MessagePort",
+  "ModalWindow",
+  "Notification",
+  "SVGElementInstance",
+  "Screen",
+  "SharedWorker",
+  "TextTrack",
+  "TextTrackCue",
+  "TextTrackList",
+  "WebSocket",
+  "WebSocketWorker",
+  "Worker",
+  "XMLHttpRequest",
+  "XMLHttpRequestEventTarget",
+  "XMLHttpRequestUpload"
+];
+var INTEGRATION_NAME6 = "BrowserApiErrors";
+var _browserApiErrorsIntegration = ((options = {}) => {
+  const _options = {
+    XMLHttpRequest: true,
+    eventTarget: true,
+    requestAnimationFrame: true,
+    setInterval: true,
+    setTimeout: true,
+    unregisterOriginalCallbacks: false,
+    ...options
+  };
+  return {
+    name: INTEGRATION_NAME6,
+    // TODO: This currently only works for the first client this is setup
+    // We may want to adjust this to check for client etc.
+    setupOnce() {
+      if (_options.setTimeout) {
+        fill(WINDOW3, "setTimeout", _wrapTimeFunction);
+      }
+      if (_options.setInterval) {
+        fill(WINDOW3, "setInterval", _wrapTimeFunction);
+      }
+      if (_options.requestAnimationFrame) {
+        fill(WINDOW3, "requestAnimationFrame", _wrapRAF);
+      }
+      if (_options.XMLHttpRequest && "XMLHttpRequest" in WINDOW3) {
+        fill(XMLHttpRequest.prototype, "send", _wrapXHR);
+      }
+      const eventTargetOption = _options.eventTarget;
+      if (eventTargetOption) {
+        const eventTarget = Array.isArray(eventTargetOption) ? eventTargetOption : DEFAULT_EVENT_TARGET;
+        eventTarget.forEach((target) => _wrapEventTarget(target, _options));
+      }
+    }
+  };
+});
+var browserApiErrorsIntegration = defineIntegration(_browserApiErrorsIntegration);
+function _wrapTimeFunction(original) {
+  return function(...args) {
+    const originalCallback = args[0];
+    args[0] = wrap(originalCallback, {
+      mechanism: {
+        data: { function: getFunctionName(original) },
+        handled: false,
+        type: "instrument"
+      }
+    });
+    return original.apply(this, args);
+  };
+}
+function _wrapRAF(original) {
+  return function(callback) {
+    return original.apply(this, [
+      wrap(callback, {
+        mechanism: {
+          data: {
+            function: "requestAnimationFrame",
+            handler: getFunctionName(original)
+          },
+          handled: false,
+          type: "instrument"
+        }
+      })
+    ]);
+  };
+}
+function _wrapXHR(originalSend) {
+  return function(...args) {
+    const xhr = this;
+    const xmlHttpRequestProps = ["onload", "onerror", "onprogress", "onreadystatechange"];
+    xmlHttpRequestProps.forEach((prop) => {
+      if (prop in xhr && typeof xhr[prop] === "function") {
+        fill(xhr, prop, function(original) {
+          const wrapOptions = {
+            mechanism: {
+              data: {
+                function: prop,
+                handler: getFunctionName(original)
+              },
+              handled: false,
+              type: "instrument"
+            }
+          };
+          const originalFunction = getOriginalFunction(original);
+          if (originalFunction) {
+            wrapOptions.mechanism.data.handler = getFunctionName(originalFunction);
+          }
+          return wrap(original, wrapOptions);
+        });
+      }
+    });
+    return originalSend.apply(this, args);
+  };
+}
+function _wrapEventTarget(target, integrationOptions) {
+  const globalObject = WINDOW3;
+  const proto = globalObject[target]?.prototype;
+  if (!proto?.hasOwnProperty?.("addEventListener")) {
+    return;
+  }
+  fill(proto, "addEventListener", function(original) {
+    return function(eventName, fn, options) {
+      try {
+        if (isEventListenerObject(fn)) {
+          fn.handleEvent = wrap(fn.handleEvent, {
+            mechanism: {
+              data: {
+                function: "handleEvent",
+                handler: getFunctionName(fn),
+                target
+              },
+              handled: false,
+              type: "instrument"
+            }
+          });
+        }
+      } catch {
+      }
+      if (integrationOptions.unregisterOriginalCallbacks) {
+        unregisterOriginalCallback(this, eventName, fn);
+      }
+      return original.apply(this, [
+        eventName,
+        wrap(fn, {
+          mechanism: {
+            data: {
+              function: "addEventListener",
+              handler: getFunctionName(fn),
+              target
+            },
+            handled: false,
+            type: "instrument"
+          }
+        }),
+        options
+      ]);
+    };
+  });
+  fill(proto, "removeEventListener", function(originalRemoveEventListener) {
+    return function(eventName, fn, options) {
+      try {
+        const originalEventHandler = fn.__sentry_wrapped__;
+        if (originalEventHandler) {
+          originalRemoveEventListener.call(this, eventName, originalEventHandler, options);
+        }
+      } catch {
+      }
+      return originalRemoveEventListener.call(this, eventName, fn, options);
+    };
+  });
+}
+function isEventListenerObject(obj) {
+  return typeof obj.handleEvent === "function";
+}
+function unregisterOriginalCallback(target, eventName, fn) {
+  if (target && typeof target === "object" && "removeEventListener" in target && typeof target.removeEventListener === "function") {
+    target.removeEventListener(eventName, fn);
+  }
+}
+
+// node_modules/@sentry/browser/build/npm/esm/integrations/browsersession.js
+var browserSessionIntegration = defineIntegration(() => {
+  return {
+    name: "BrowserSession",
+    setupOnce() {
+      if (typeof WINDOW3.document === "undefined") {
+        DEBUG_BUILD3 && debug.warn("Using the `browserSessionIntegration` in non-browser environments is not supported.");
+        return;
+      }
+      startSession({ ignoreDuration: true });
+      captureSession();
+      addHistoryInstrumentationHandler(({ from, to }) => {
+        if (from !== void 0 && from !== to) {
+          startSession({ ignoreDuration: true });
+          captureSession();
+        }
+      });
+    }
+  };
+});
+
+// node_modules/@sentry/browser/build/npm/esm/integrations/globalhandlers.js
+var INTEGRATION_NAME7 = "GlobalHandlers";
+var _globalHandlersIntegration = ((options = {}) => {
+  const _options = {
+    onerror: true,
+    onunhandledrejection: true,
+    ...options
+  };
+  return {
+    name: INTEGRATION_NAME7,
+    setupOnce() {
+      Error.stackTraceLimit = 50;
+    },
+    setup(client) {
+      if (_options.onerror) {
+        _installGlobalOnErrorHandler(client);
+        globalHandlerLog("onerror");
+      }
+      if (_options.onunhandledrejection) {
+        _installGlobalOnUnhandledRejectionHandler(client);
+        globalHandlerLog("onunhandledrejection");
+      }
+    }
+  };
+});
+var globalHandlersIntegration = defineIntegration(_globalHandlersIntegration);
+function _installGlobalOnErrorHandler(client) {
+  addGlobalErrorInstrumentationHandler((data) => {
+    const { stackParser, attachStacktrace } = getOptions();
+    if (getClient() !== client || shouldIgnoreOnError()) {
+      return;
+    }
+    const { msg, url, line, column, error: error2 } = data;
+    const event = _enhanceEventWithInitialFrame(
+      eventFromUnknownInput(stackParser, error2 || msg, void 0, attachStacktrace, false),
+      url,
+      line,
+      column
+    );
+    event.level = "error";
+    captureEvent(event, {
+      originalException: error2,
+      mechanism: {
+        handled: false,
+        type: "onerror"
+      }
+    });
+  });
+}
+function _installGlobalOnUnhandledRejectionHandler(client) {
+  addGlobalUnhandledRejectionInstrumentationHandler((e) => {
+    const { stackParser, attachStacktrace } = getOptions();
+    if (getClient() !== client || shouldIgnoreOnError()) {
+      return;
+    }
+    const error2 = _getUnhandledRejectionError(e);
+    const event = isPrimitive(error2) ? _eventFromRejectionWithPrimitive(error2) : eventFromUnknownInput(stackParser, error2, void 0, attachStacktrace, true);
+    event.level = "error";
+    captureEvent(event, {
+      originalException: error2,
+      mechanism: {
+        handled: false,
+        type: "onunhandledrejection"
+      }
+    });
+  });
+}
+function _getUnhandledRejectionError(error2) {
+  if (isPrimitive(error2)) {
+    return error2;
+  }
+  try {
+    if ("reason" in error2) {
+      return error2.reason;
+    }
+    if ("detail" in error2 && "reason" in error2.detail) {
+      return error2.detail.reason;
+    }
+  } catch {
+  }
+  return error2;
+}
+function _eventFromRejectionWithPrimitive(reason) {
+  return {
+    exception: {
+      values: [
+        {
+          type: "UnhandledRejection",
+          // String() is needed because the Primitive type includes symbols (which can't be automatically stringified)
+          value: `Non-Error promise rejection captured with value: ${String(reason)}`
+        }
+      ]
+    }
+  };
+}
+function _enhanceEventWithInitialFrame(event, url, line, column) {
+  const e = event.exception = event.exception || {};
+  const ev = e.values = e.values || [];
+  const ev0 = ev[0] = ev[0] || {};
+  const ev0s = ev0.stacktrace = ev0.stacktrace || {};
+  const ev0sf = ev0s.frames = ev0s.frames || [];
+  const colno = column;
+  const lineno = line;
+  const filename = isString(url) && url.length > 0 ? url : getLocationHref();
+  if (ev0sf.length === 0) {
+    ev0sf.push({
+      colno,
+      filename,
+      function: UNKNOWN_FUNCTION,
+      in_app: true,
+      lineno
+    });
+  }
+  return event;
+}
+function globalHandlerLog(type) {
+  DEBUG_BUILD3 && debug.log(`Global Handler attached: ${type}`);
+}
+function getOptions() {
+  const client = getClient();
+  const options = client?.getOptions() || {
+    stackParser: () => [],
+    attachStacktrace: false
+  };
+  return options;
+}
+
+// node_modules/@sentry/browser/build/npm/esm/integrations/httpcontext.js
+var httpContextIntegration = defineIntegration(() => {
+  return {
+    name: "HttpContext",
+    preprocessEvent(event) {
+      if (!WINDOW3.navigator && !WINDOW3.location && !WINDOW3.document) {
+        return;
+      }
+      const reqData = getHttpRequestData();
+      const headers = {
+        ...reqData.headers,
+        ...event.request?.headers
+      };
+      event.request = {
+        ...reqData,
+        ...event.request,
+        headers
+      };
+    }
+  };
+});
+
+// node_modules/@sentry/browser/build/npm/esm/integrations/linkederrors.js
+var DEFAULT_KEY = "cause";
+var DEFAULT_LIMIT = 5;
+var INTEGRATION_NAME8 = "LinkedErrors";
+var _linkedErrorsIntegration = ((options = {}) => {
+  const limit = options.limit || DEFAULT_LIMIT;
+  const key = options.key || DEFAULT_KEY;
+  return {
+    name: INTEGRATION_NAME8,
+    preprocessEvent(event, hint, client) {
+      const options2 = client.getOptions();
+      applyAggregateErrorsToEvent(
+        // This differs from the LinkedErrors integration in core by using a different exceptionFromError function
+        exceptionFromError,
+        options2.stackParser,
+        key,
+        limit,
+        event,
+        hint
+      );
+    }
+  };
+});
+var linkedErrorsIntegration = defineIntegration(_linkedErrorsIntegration);
+
+// node_modules/@sentry/browser/build/npm/esm/utils/detectBrowserExtension.js
+function checkAndWarnIfIsEmbeddedBrowserExtension() {
+  if (_isEmbeddedBrowserExtension()) {
+    if (DEBUG_BUILD3) {
+      consoleSandbox(() => {
+        console.error(
+          "[Sentry] You cannot use Sentry.init() in a browser extension, see: https://docs.sentry.io/platforms/javascript/best-practices/browser-extensions/"
+        );
+      });
+    }
+    return true;
+  }
+  return false;
+}
+function _isEmbeddedBrowserExtension() {
+  if (typeof WINDOW3.window === "undefined") {
+    return false;
+  }
+  const _window = WINDOW3;
+  if (_window.nw) {
+    return false;
+  }
+  const extensionObject = _window["chrome"] || _window["browser"];
+  if (!extensionObject?.runtime?.id) {
+    return false;
+  }
+  const href = getLocationHref();
+  const extensionProtocols = ["chrome-extension", "moz-extension", "ms-browser-extension", "safari-web-extension"];
+  const isDedicatedExtensionPage = WINDOW3 === WINDOW3.top && extensionProtocols.some((protocol) => href.startsWith(`${protocol}://`));
+  return !isDedicatedExtensionPage;
+}
+
+// node_modules/@sentry/browser/build/npm/esm/sdk.js
+function getDefaultIntegrations(_options) {
+  return [
+    // TODO(v10): Replace with `eventFiltersIntegration` once we remove the deprecated `inboundFiltersIntegration`
+    // eslint-disable-next-line deprecation/deprecation
+    inboundFiltersIntegration(),
+    functionToStringIntegration(),
+    browserApiErrorsIntegration(),
+    breadcrumbsIntegration(),
+    globalHandlersIntegration(),
+    linkedErrorsIntegration(),
+    dedupeIntegration(),
+    httpContextIntegration(),
+    browserSessionIntegration()
+  ];
+}
+function init(options = {}) {
+  const shouldDisableBecauseIsBrowserExtenstion = !options.skipBrowserExtensionCheck && checkAndWarnIfIsEmbeddedBrowserExtension();
+  const clientOptions = {
+    ...options,
+    enabled: shouldDisableBecauseIsBrowserExtenstion ? false : options.enabled,
+    stackParser: stackParserFromStackParserOptions(options.stackParser || defaultStackParser),
+    integrations: getIntegrationsToSetup({
+      integrations: options.integrations,
+      defaultIntegrations: options.defaultIntegrations == null ? getDefaultIntegrations() : options.defaultIntegrations
+    }),
+    transport: options.transport || makeFetchTransport
+  };
+  return initAndBind(BrowserClient, clientOptions);
+}
+
+// node_modules/@sentry/react/build/esm/sdk.js
+var import_react = __toESM(require_react(), 1);
+function init2(options) {
+  const opts = {
+    ...options
+  };
+  applySdkMetadata(opts, "react");
+  setContext("react", { version: import_react.version });
+  return init(opts);
+}
+
+// src/utils/sentry.ts
+var isDev = typeof window !== "undefined" && window.DEV_MODE === true;
+if (typeof window !== "undefined" && !isDev) {
+  init2({
+    // TODO: Reemplazar con tu DSN de GlitchTip
+    // Obtener en: https://app.glitchtip.com/ -> Tu Proyecto -> Settings -> DSN
+    dsn: "https://YOUR_KEY@app.glitchtip.com/YOUR_PROJECT_ID",
+    environment: "production",
+    integrations: [
+      captureConsoleIntegration({ levels: ["warn", "error"] })
+    ]
+  });
+  const originalLog = console.log;
+  console.log = (...args) => {
+    addBreadcrumb({
+      category: "console",
+      message: args.map((a) => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" "),
+      level: "info"
+    });
+  };
+  const originalWarn = console.warn;
+  console.warn = (...args) => {
+  };
+}
+
 // src/index.tsx
-var import_react8 = __toESM(require_react(), 1);
+var import_react10 = __toESM(require_react(), 1);
 
 // package.json
-var version = "1.0.7";
+var version2 = "1.0.7";
 
 // node_modules/clsx/dist/clsx.mjs
 function r(e) {
@@ -2536,7 +8648,7 @@ var import_jsx_runtime11 = __toESM(require_jsx_runtime(), 1);
 var React26 = __toESM(require_react(), 1);
 
 // node_modules/lucide-react/dist/esm/createLucideIcon.js
-var import_react = __toESM(require_react());
+var import_react2 = __toESM(require_react());
 
 // node_modules/lucide-react/dist/esm/defaultAttributes.js
 var defaultAttributes = {
@@ -2554,8 +8666,8 @@ var defaultAttributes = {
 // node_modules/lucide-react/dist/esm/createLucideIcon.js
 var toKebabCase = (string) => string.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase().trim();
 var createLucideIcon = (iconName, iconNode) => {
-  const Component = (0, import_react.forwardRef)(
-    ({ color = "currentColor", size = 24, strokeWidth = 2, absoluteStrokeWidth, className = "", children, ...rest }, ref) => (0, import_react.createElement)(
+  const Component = (0, import_react2.forwardRef)(
+    ({ color = "currentColor", size = 24, strokeWidth = 2, absoluteStrokeWidth, className = "", children, ...rest }, ref) => (0, import_react2.createElement)(
       "svg",
       {
         ref,
@@ -2568,7 +8680,7 @@ var createLucideIcon = (iconName, iconNode) => {
         ...rest
       },
       [
-        ...iconNode.map(([tag, attrs]) => (0, import_react.createElement)(tag, attrs)),
+        ...iconNode.map(([tag, attrs]) => (0, import_react2.createElement)(tag, attrs)),
         ...Array.isArray(children) ? children : [children]
       ]
     )
@@ -3271,9 +9383,9 @@ function usePrevious(value) {
 }
 
 // node_modules/@radix-ui/react-collection/dist/index.mjs
-var import_react2 = __toESM(require_react(), 1);
-var import_jsx_runtime5 = __toESM(require_jsx_runtime(), 1);
 var import_react3 = __toESM(require_react(), 1);
+var import_jsx_runtime5 = __toESM(require_jsx_runtime(), 1);
+var import_react4 = __toESM(require_react(), 1);
 var import_jsx_runtime6 = __toESM(require_jsx_runtime(), 1);
 function createCollection(name) {
   const PROVIDER_NAME = name + "CollectionProvider";
@@ -3284,14 +9396,14 @@ function createCollection(name) {
   );
   const CollectionProvider = (props) => {
     const { scope, children } = props;
-    const ref = import_react2.default.useRef(null);
-    const itemMap = import_react2.default.useRef(/* @__PURE__ */ new Map()).current;
+    const ref = import_react3.default.useRef(null);
+    const itemMap = import_react3.default.useRef(/* @__PURE__ */ new Map()).current;
     return /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(CollectionProviderImpl, { scope, itemMap, collectionRef: ref, children });
   };
   CollectionProvider.displayName = PROVIDER_NAME;
   const COLLECTION_SLOT_NAME = name + "CollectionSlot";
   const CollectionSlotImpl = createSlot(COLLECTION_SLOT_NAME);
-  const CollectionSlot = import_react2.default.forwardRef(
+  const CollectionSlot = import_react3.default.forwardRef(
     (props, forwardedRef) => {
       const { scope, children } = props;
       const context = useCollectionContext(COLLECTION_SLOT_NAME, scope);
@@ -3303,13 +9415,13 @@ function createCollection(name) {
   const ITEM_SLOT_NAME = name + "CollectionItemSlot";
   const ITEM_DATA_ATTR = "data-radix-collection-item";
   const CollectionItemSlotImpl = createSlot(ITEM_SLOT_NAME);
-  const CollectionItemSlot = import_react2.default.forwardRef(
+  const CollectionItemSlot = import_react3.default.forwardRef(
     (props, forwardedRef) => {
       const { scope, children, ...itemData } = props;
-      const ref = import_react2.default.useRef(null);
+      const ref = import_react3.default.useRef(null);
       const composedRefs = useComposedRefs(forwardedRef, ref);
       const context = useCollectionContext(ITEM_SLOT_NAME, scope);
-      import_react2.default.useEffect(() => {
+      import_react3.default.useEffect(() => {
         context.itemMap.set(ref, { ref, ...itemData });
         return () => void context.itemMap.delete(ref);
       });
@@ -3319,7 +9431,7 @@ function createCollection(name) {
   CollectionItemSlot.displayName = ITEM_SLOT_NAME;
   function useCollection2(scope) {
     const context = useCollectionContext(name + "CollectionConsumer", scope);
-    const getItems = import_react2.default.useCallback(() => {
+    const getItems = import_react3.default.useCallback(() => {
       const collectionNode = context.collectionRef.current;
       if (!collectionNode) return [];
       const orderedNodes = Array.from(collectionNode.querySelectorAll(`[${ITEM_DATA_ATTR}]`));
@@ -4041,9 +10153,9 @@ var React19 = __toESM(require_react(), 1);
 var import_jsx_runtime30 = __toESM(require_jsx_runtime(), 1);
 var React20 = __toESM(require_react(), 1);
 var import_jsx_runtime31 = __toESM(require_jsx_runtime(), 1);
-var import_react4 = __toESM(require_react(), 1);
-var import_jsx_runtime32 = __toESM(require_jsx_runtime(), 1);
 var import_react5 = __toESM(require_react(), 1);
+var import_jsx_runtime32 = __toESM(require_jsx_runtime(), 1);
+var import_react6 = __toESM(require_react(), 1);
 var import_jsx_runtime33 = __toESM(require_jsx_runtime(), 1);
 var import_jsx_runtime34 = __toESM(require_jsx_runtime(), 1);
 function cn(...inputs) {
@@ -4100,7 +10212,7 @@ var BizuitRadioButton = React72.forwardRef(
     name,
     required = false,
     label,
-    error
+    error: error2
   }, ref) => {
     return /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("div", { className: cn("space-y-2", className), children: [
       label && /* @__PURE__ */ (0, import_jsx_runtime18.jsxs)("label", { className: "text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70", children: [
@@ -4154,7 +10266,7 @@ var BizuitRadioButton = React72.forwardRef(
           ] }, option.value))
         }
       ),
-      error && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("p", { className: "text-sm text-red-500 mt-1", children: error })
+      error2 && /* @__PURE__ */ (0, import_jsx_runtime18.jsx)("p", { className: "text-sm text-red-500 mt-1", children: error2 })
     ] });
   }
 );
@@ -4171,7 +10283,7 @@ var BizuitSignature = React82.forwardRef(
     className,
     label,
     required = false,
-    error,
+    error: error2,
     disabled = false,
     showDownload = true
   }, ref) => {
@@ -4303,7 +10415,7 @@ var BizuitSignature = React82.forwardRef(
         {
           className: cn(
             "border-2 rounded-lg overflow-hidden",
-            error ? "border-red-500" : "border-gray-300 dark:border-gray-700",
+            error2 ? "border-red-500" : "border-gray-300 dark:border-gray-700",
             disabled && "opacity-50 cursor-not-allowed"
           ),
           style: { width: `${width}px` },
@@ -4375,7 +10487,7 @@ var BizuitSignature = React82.forwardRef(
           }
         )
       ] }),
-      error && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("p", { className: "text-sm text-red-500", children: error })
+      error2 && /* @__PURE__ */ (0, import_jsx_runtime19.jsx)("p", { className: "text-sm text-red-500", children: error2 })
     ] });
   }
 );
@@ -4393,7 +10505,7 @@ var BizuitDocumentInput = React92.forwardRef(
     className,
     disabled = false,
     required = false,
-    error
+    error: error2
   }, ref) => {
     const inputRef = React92.useRef(null);
     const [isDragging, setIsDragging] = React92.useState(false);
@@ -4455,7 +10567,7 @@ var BizuitDocumentInput = React92.forwardRef(
             "border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors",
             isDragging && "border-primary bg-primary/5",
             disabled && "opacity-50 cursor-not-allowed",
-            error && "border-red-500"
+            error2 && "border-red-500"
           ),
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime20.jsx)(Upload, { className: "h-10 w-10 mx-auto text-muted-foreground mb-2" }),
@@ -4511,7 +10623,7 @@ var BizuitDocumentInput = React92.forwardRef(
         },
         doc.id
       )) }),
-      error && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "text-sm text-red-500", children: error })
+      error2 && /* @__PURE__ */ (0, import_jsx_runtime20.jsx)("p", { className: "text-sm text-red-500", children: error2 })
     ] });
   }
 );
@@ -4526,7 +10638,7 @@ var BizuitGeolocation = React102.forwardRef(
     className,
     disabled = false,
     required = false,
-    error
+    error: error2
   }, ref) => {
     const [loading, setLoading] = React102.useState(false);
     const [geoError, setGeoError] = React102.useState();
@@ -4548,8 +10660,8 @@ var BizuitGeolocation = React102.forwardRef(
           onChange?.(location);
           setLoading(false);
         },
-        (error2) => {
-          setGeoError(error2.message);
+        (error22) => {
+          setGeoError(error22.message);
           setLoading(false);
         },
         { enableHighAccuracy: true }
@@ -4604,9 +10716,9 @@ var BizuitGeolocation = React102.forwardRef(
           }
         ) })
       ] }),
-      (geoError || error) && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "flex items-center gap-2 text-sm text-red-500", children: [
+      (geoError || error2) && /* @__PURE__ */ (0, import_jsx_runtime21.jsxs)("div", { className: "flex items-center gap-2 text-sm text-red-500", children: [
         /* @__PURE__ */ (0, import_jsx_runtime21.jsx)(AlertCircle, { className: "h-4 w-4" }),
-        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { children: geoError || error })
+        /* @__PURE__ */ (0, import_jsx_runtime21.jsx)("span", { children: geoError || error2 })
       ] })
     ] });
   }
@@ -4945,7 +11057,7 @@ var BizuitMedia = React152.forwardRef(
     loop = false,
     muted = false,
     className,
-    onLoad,
+    onLoad: onLoad2,
     onError,
     onCapture,
     onQRCodeDetected,
@@ -5083,7 +11195,7 @@ var BizuitMedia = React152.forwardRef(
           alt,
           width,
           height,
-          onLoad,
+          onLoad: onLoad2,
           onError,
           className: "w-full h-full object-cover"
         }
@@ -5099,7 +11211,7 @@ var BizuitMedia = React152.forwardRef(
             autoPlay,
             loop,
             muted,
-            onLoadedData: onLoad,
+            onLoadedData: onLoad2,
             onError,
             className: "w-full h-full object-contain",
             controls
@@ -5145,7 +11257,7 @@ var BizuitMedia = React152.forwardRef(
           autoPlay,
           loop,
           muted,
-          onLoadedData: onLoad,
+          onLoadedData: onLoad2,
           onError,
           controls,
           className: "w-full"
@@ -5287,7 +11399,7 @@ var BizuitIFrame = React162.forwardRef(
     height = 500,
     loading = "lazy",
     showLoader = true,
-    onLoad,
+    onLoad: onLoad2,
     onError,
     className,
     ...props
@@ -5296,7 +11408,7 @@ var BizuitIFrame = React162.forwardRef(
     const [hasError, setHasError] = React162.useState(false);
     const handleLoad = () => {
       setIsLoading(false);
-      onLoad?.();
+      onLoad2?.();
     };
     const handleError = () => {
       setIsLoading(false);
@@ -5401,11 +11513,11 @@ function BizuitThemeProvider({
   };
   return /* @__PURE__ */ (0, import_jsx_runtime28.jsx)(ThemeProviderContext.Provider, { ...props, value, children });
 }
-var BizuitAuthContext = (0, import_react4.createContext)(void 0);
+var BizuitAuthContext = (0, import_react5.createContext)(void 0);
 
 // node_modules/axios/lib/helpers/bind.js
 function bind(fn, thisArg) {
-  return function wrap() {
+  return function wrap2() {
     return fn.apply(thisArg, arguments);
   };
 }
@@ -5438,12 +11550,12 @@ function isArrayBufferView(val) {
   }
   return result;
 }
-var isString = typeOfTest("string");
+var isString2 = typeOfTest("string");
 var isFunction2 = typeOfTest("function");
 var isNumber2 = typeOfTest("number");
 var isObject = (thing) => thing !== null && typeof thing === "object";
 var isBoolean = (thing) => thing === true || thing === false;
-var isPlainObject = (val) => {
+var isPlainObject2 = (val) => {
   if (kindOf(val) !== "object") {
     return false;
   }
@@ -5471,7 +11583,7 @@ var isFormData = (thing) => {
   kind === "object" && isFunction2(thing.toString) && thing.toString() === "[object FormData]"));
 };
 var isURLSearchParams = kindOfTest("URLSearchParams");
-var [isReadableStream, isRequest, isResponse, isHeaders] = ["ReadableStream", "Request", "Response", "Headers"].map(kindOfTest);
+var [isReadableStream, isRequest2, isResponse, isHeaders] = ["ReadableStream", "Request", "Response", "Headers"].map(kindOfTest);
 var trim = (str) => str.trim ? str.trim() : str.replace(/^[\s\uFEFF\xA0]+|[\s\uFEFF\xA0]+$/g, "");
 function forEach(obj, fn, { allOwnKeys = false } = {}) {
   if (obj === null || typeof obj === "undefined") {
@@ -5520,15 +11632,15 @@ var _global = (() => {
   return typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : global;
 })();
 var isContextDefined = (context) => !isUndefined(context) && context !== _global;
-function merge() {
+function merge2() {
   const { caseless, skipUndefined } = isContextDefined(this) && this || {};
   const result = {};
   const assignValue = (val, key) => {
     const targetKey = caseless && findKey(result, key) || key;
-    if (isPlainObject(result[targetKey]) && isPlainObject(val)) {
-      result[targetKey] = merge(result[targetKey], val);
-    } else if (isPlainObject(val)) {
-      result[targetKey] = merge({}, val);
+    if (isPlainObject2(result[targetKey]) && isPlainObject2(val)) {
+      result[targetKey] = merge2(result[targetKey], val);
+    } else if (isPlainObject2(val)) {
+      result[targetKey] = merge2({}, val);
     } else if (isArray(val)) {
       result[targetKey] = val.slice();
     } else if (!skipUndefined || !isUndefined(val)) {
@@ -5637,7 +11749,7 @@ var toCamelCase = (str) => {
   );
 };
 var hasOwnProperty = (({ hasOwnProperty: hasOwnProperty2 }) => (obj, prop) => hasOwnProperty2.call(obj, prop))(Object.prototype);
-var isRegExp = kindOfTest("RegExp");
+var isRegExp2 = kindOfTest("RegExp");
 var reduceDescriptors = (obj, reducer) => {
   const descriptors2 = Object.getOwnPropertyDescriptors(obj);
   const reducedDescriptors = {};
@@ -5688,7 +11800,7 @@ function isSpecCompliantForm(thing) {
 }
 var toJSONObject = (obj) => {
   const stack = new Array(10);
-  const visit = (source, i) => {
+  const visit2 = (source, i) => {
     if (isObject(source)) {
       if (stack.indexOf(source) >= 0) {
         return;
@@ -5700,7 +11812,7 @@ var toJSONObject = (obj) => {
         stack[i] = source;
         const target = isArray(source) ? [] : {};
         forEach(source, (value, key) => {
-          const reducedValue = visit(value, i + 1);
+          const reducedValue = visit2(value, i + 1);
           !isUndefined(reducedValue) && (target[key] = reducedValue);
         });
         stack[i] = void 0;
@@ -5709,10 +11821,10 @@ var toJSONObject = (obj) => {
     }
     return source;
   };
-  return visit(obj, 0);
+  return visit2(obj, 0);
 };
 var isAsyncFn = kindOfTest("AsyncFunction");
-var isThenable = (thing) => thing && (isObject(thing) || isFunction2(thing)) && isFunction2(thing.then) && isFunction2(thing.catch);
+var isThenable2 = (thing) => thing && (isObject(thing) || isFunction2(thing)) && isFunction2(thing.then) && isFunction2(thing.catch);
 var _setImmediate = ((setImmediateSupported, postMessageSupported) => {
   if (setImmediateSupported) {
     return setImmediate;
@@ -5740,28 +11852,28 @@ var utils_default = {
   isBuffer,
   isFormData,
   isArrayBufferView,
-  isString,
+  isString: isString2,
   isNumber: isNumber2,
   isBoolean,
   isObject,
-  isPlainObject,
+  isPlainObject: isPlainObject2,
   isEmptyObject,
   isReadableStream,
-  isRequest,
+  isRequest: isRequest2,
   isResponse,
   isHeaders,
   isUndefined,
   isDate,
   isFile,
   isBlob,
-  isRegExp,
+  isRegExp: isRegExp2,
   isFunction: isFunction2,
   isStream,
   isURLSearchParams,
   isTypedArray,
   isFileList,
   forEach,
-  merge,
+  merge: merge2,
   extend,
   trim,
   stripBOM,
@@ -5789,7 +11901,7 @@ var utils_default = {
   isSpecCompliantForm,
   toJSONObject,
   isAsyncFn,
-  isThenable,
+  isThenable: isThenable2,
   setImmediate: _setImmediate,
   asap,
   isIterable
@@ -5855,20 +11967,20 @@ var descriptors = {};
 });
 Object.defineProperties(AxiosError, descriptors);
 Object.defineProperty(prototype, "isAxiosError", { value: true });
-AxiosError.from = (error, code, config, request, response, customProps) => {
+AxiosError.from = (error2, code, config, request, response, customProps) => {
   const axiosError = Object.create(prototype);
-  utils_default.toFlatObject(error, axiosError, function filter2(obj) {
+  utils_default.toFlatObject(error2, axiosError, function filter2(obj) {
     return obj !== Error.prototype;
   }, (prop) => {
     return prop !== "isAxiosError";
   });
-  const msg = error && error.message ? error.message : "Error";
-  const errCode = code == null && error ? error.code : code;
+  const msg = error2 && error2.message ? error2.message : "Error";
+  const errCode = code == null && error2 ? error2.code : code;
   AxiosError.call(axiosError, msg, errCode, config, request, response);
-  if (error && axiosError.cause == null) {
-    Object.defineProperty(axiosError, "cause", { value: error, configurable: true });
+  if (error2 && axiosError.cause == null) {
+    Object.defineProperty(axiosError, "cause", { value: error2, configurable: true });
   }
-  axiosError.name = error && error.name || "Error";
+  axiosError.name = error2 && error2.name || "Error";
   customProps && Object.assign(axiosError, customProps);
   return axiosError;
 };
@@ -6737,8 +12849,8 @@ function throttle(fn, freq) {
       }
     }
   };
-  const flush = () => lastArgs && invoke(lastArgs);
-  return [throttled, flush];
+  const flush2 = () => lastArgs && invoke(lastArgs);
+  return [throttled, flush2];
 }
 var throttle_default = throttle;
 
@@ -6924,9 +13036,9 @@ function mergeConfig(config1, config2) {
     headers: (a, b, prop) => mergeDeepProperties(headersToObject(a), headersToObject(b), prop, true)
   };
   utils_default.forEach(Object.keys({ ...config1, ...config2 }), function computeConfigValue(prop) {
-    const merge2 = mergeMap[prop] || mergeDeepProperties;
-    const configValue = merge2(config1[prop], config2[prop], prop);
-    utils_default.isUndefined(configValue) && merge2 !== mergeDirectKeys || (config[prop] = configValue);
+    const merge3 = mergeMap[prop] || mergeDeepProperties;
+    const configValue = merge3(config1[prop], config2[prop], prop);
+    utils_default.isUndefined(configValue) && merge3 !== mergeDirectKeys || (config[prop] = configValue);
   });
   return config;
 }
@@ -7214,13 +13326,13 @@ var trackStream = (stream, chunkSize, onProgress, onFinish) => {
 // node_modules/axios/lib/adapters/fetch.js
 var DEFAULT_CHUNK_SIZE = 64 * 1024;
 var { isFunction: isFunction3 } = utils_default;
-var globalFetchAPI = (({ Request, Response }) => ({
-  Request,
-  Response
+var globalFetchAPI = (({ Request: Request2, Response: Response2 }) => ({
+  Request: Request2,
+  Response: Response2
 }))(utils_default.global);
 var {
   ReadableStream: ReadableStream2,
-  TextEncoder
+  TextEncoder: TextEncoder2
 } = utils_default.global;
 var test = (fn, ...args) => {
   try {
@@ -7233,18 +13345,18 @@ var factory = (env) => {
   env = utils_default.merge.call({
     skipUndefined: true
   }, globalFetchAPI, env);
-  const { fetch: envFetch, Request, Response } = env;
+  const { fetch: envFetch, Request: Request2, Response: Response2 } = env;
   const isFetchSupported = envFetch ? isFunction3(envFetch) : typeof fetch === "function";
-  const isRequestSupported = isFunction3(Request);
-  const isResponseSupported = isFunction3(Response);
+  const isRequestSupported = isFunction3(Request2);
+  const isResponseSupported = isFunction3(Response2);
   if (!isFetchSupported) {
     return false;
   }
   const isReadableStreamSupported = isFetchSupported && isFunction3(ReadableStream2);
-  const encodeText = isFetchSupported && (typeof TextEncoder === "function" ? /* @__PURE__ */ ((encoder) => (str) => encoder.encode(str))(new TextEncoder()) : async (str) => new Uint8Array(await new Request(str).arrayBuffer()));
+  const encodeText = isFetchSupported && (typeof TextEncoder2 === "function" ? /* @__PURE__ */ ((encoder) => (str) => encoder.encode(str))(new TextEncoder2()) : async (str) => new Uint8Array(await new Request2(str).arrayBuffer()));
   const supportsRequestStream = isRequestSupported && isReadableStreamSupported && test(() => {
     let duplexAccessed = false;
-    const hasContentType = new Request(platform_default.origin, {
+    const hasContentType = new Request2(platform_default.origin, {
       body: new ReadableStream2(),
       method: "POST",
       get duplex() {
@@ -7254,7 +13366,7 @@ var factory = (env) => {
     }).headers.has("Content-Type");
     return duplexAccessed && !hasContentType;
   });
-  const supportsResponseStream = isResponseSupported && isReadableStreamSupported && test(() => utils_default.isReadableStream(new Response("").body));
+  const supportsResponseStream = isResponseSupported && isReadableStreamSupported && test(() => utils_default.isReadableStream(new Response2("").body));
   const resolvers = {
     stream: supportsResponseStream && ((res) => res.body)
   };
@@ -7277,7 +13389,7 @@ var factory = (env) => {
       return body.size;
     }
     if (utils_default.isSpecCompliantForm(body)) {
-      const _request = new Request(platform_default.origin, {
+      const _request = new Request2(platform_default.origin, {
         method: "POST",
         body
       });
@@ -7322,7 +13434,7 @@ var factory = (env) => {
     let requestContentLength;
     try {
       if (onUploadProgress && supportsRequestStream && method !== "get" && method !== "head" && (requestContentLength = await resolveBodyLength(headers, data)) !== 0) {
-        let _request = new Request(url, {
+        let _request = new Request2(url, {
           method: "POST",
           body: data,
           duplex: "half"
@@ -7332,17 +13444,17 @@ var factory = (env) => {
           headers.setContentType(contentTypeHeader);
         }
         if (_request.body) {
-          const [onProgress, flush] = progressEventDecorator(
+          const [onProgress, flush2] = progressEventDecorator(
             requestContentLength,
             progressEventReducer(asyncDecorator(onUploadProgress))
           );
-          data = trackStream(_request.body, DEFAULT_CHUNK_SIZE, onProgress, flush);
+          data = trackStream(_request.body, DEFAULT_CHUNK_SIZE, onProgress, flush2);
         }
       }
       if (!utils_default.isString(withCredentials)) {
         withCredentials = withCredentials ? "include" : "omit";
       }
-      const isCredentialsSupported = isRequestSupported && "credentials" in Request.prototype;
+      const isCredentialsSupported = isRequestSupported && "credentials" in Request2.prototype;
       const resolvedOptions = {
         ...fetchOptions,
         signal: composedSignal,
@@ -7352,7 +13464,7 @@ var factory = (env) => {
         duplex: "half",
         credentials: isCredentialsSupported ? withCredentials : void 0
       };
-      request = isRequestSupported && new Request(url, resolvedOptions);
+      request = isRequestSupported && new Request2(url, resolvedOptions);
       let response = await (isRequestSupported ? _fetch(request, fetchOptions) : _fetch(url, resolvedOptions));
       const isStreamResponse = supportsResponseStream && (responseType === "stream" || responseType === "response");
       if (supportsResponseStream && (onDownloadProgress || isStreamResponse && unsubscribe)) {
@@ -7361,13 +13473,13 @@ var factory = (env) => {
           options[prop] = response[prop];
         });
         const responseContentLength = utils_default.toFiniteNumber(response.headers.get("content-length"));
-        const [onProgress, flush] = onDownloadProgress && progressEventDecorator(
+        const [onProgress, flush2] = onDownloadProgress && progressEventDecorator(
           responseContentLength,
           progressEventReducer(asyncDecorator(onDownloadProgress), true)
         ) || [];
-        response = new Response(
+        response = new Response2(
           trackStream(response.body, DEFAULT_CHUNK_SIZE, onProgress, () => {
-            flush && flush();
+            flush2 && flush2();
             unsubscribe && unsubscribe();
           }),
           options
@@ -7403,11 +13515,11 @@ var factory = (env) => {
 var seedCache = /* @__PURE__ */ new Map();
 var getFetch = (config) => {
   let env = config && config.env || {};
-  const { fetch: fetch2, Request, Response } = env;
+  const { fetch: fetch3, Request: Request2, Response: Response2 } = env;
   const seeds = [
-    Request,
-    Response,
-    fetch2
+    Request2,
+    Response2,
+    fetch3
   ];
   let len = seeds.length, i = len, seed, target, map = seedCache;
   while (i--) {
@@ -7541,23 +13653,23 @@ var validators = {};
   };
 });
 var deprecatedWarnings = {};
-validators.transitional = function transitional(validator, version2, message) {
+validators.transitional = function transitional(validator, version3, message) {
   function formatMessage(opt, desc) {
     return "[Axios v" + VERSION + "] Transitional option '" + opt + "'" + desc + (message ? ". " + message : "");
   }
   return (value, opt, opts) => {
     if (validator === false) {
       throw new AxiosError_default(
-        formatMessage(opt, " has been removed" + (version2 ? " in " + version2 : "")),
+        formatMessage(opt, " has been removed" + (version3 ? " in " + version3 : "")),
         AxiosError_default.ERR_DEPRECATED
       );
     }
-    if (version2 && !deprecatedWarnings[opt]) {
+    if (version3 && !deprecatedWarnings[opt]) {
       deprecatedWarnings[opt] = true;
       console.warn(
         formatMessage(
           opt,
-          " has been deprecated since v" + version2 + " and will be removed in the near future"
+          " has been deprecated since v" + version3 + " and will be removed in the near future"
         )
       );
     }
@@ -7719,15 +13831,15 @@ var Axios = class {
       const onRejected = requestInterceptorChain[i++];
       try {
         newConfig = onFulfilled(newConfig);
-      } catch (error) {
-        onRejected.call(this, error);
+      } catch (error2) {
+        onRejected.call(this, error2);
         break;
       }
     }
     try {
       promise = dispatchRequest.call(this, newConfig);
-    } catch (error) {
-      return Promise.reject(error);
+    } catch (error2) {
+      return Promise.reject(error2);
     }
     i = 0;
     len = responseInterceptorChain.length;
@@ -7869,7 +13981,7 @@ var CancelToken_default = CancelToken;
 
 // node_modules/axios/lib/helpers/spread.js
 function spread(callback) {
-  return function wrap(arr) {
+  return function wrap2(arr) {
     return callback.apply(null, arr);
   };
 }
@@ -8010,9 +14122,10 @@ var {
 } = axios_default;
 
 // node_modules/@tyconsa/bizuit-form-sdk/dist/index.mjs
-var import_react6 = __toESM(require_react(), 1);
-var import_jsx_runtime35 = __toESM(require_jsx_runtime(), 1);
 var import_react7 = __toESM(require_react(), 1);
+var import_jsx_runtime35 = __toESM(require_jsx_runtime(), 1);
+var import_react8 = __toESM(require_react(), 1);
+var import_react9 = __toESM(require_react(), 1);
 var BizuitHttpClient = class {
   constructor(config) {
     this.config = config;
@@ -8038,8 +14151,8 @@ var BizuitHttpClient = class {
         }
         return config;
       },
-      (error) => {
-        return Promise.reject(this.handleError(error));
+      (error2) => {
+        return Promise.reject(this.handleError(error2));
       }
     );
     this.axiosInstance.interceptors.response.use(
@@ -8052,8 +14165,8 @@ var BizuitHttpClient = class {
         }
         return response;
       },
-      (error) => {
-        return Promise.reject(this.handleError(error));
+      (error2) => {
+        return Promise.reject(this.handleError(error2));
       }
     );
   }
@@ -8068,21 +14181,21 @@ var BizuitHttpClient = class {
     }
     return sanitized;
   }
-  handleError(error) {
+  handleError(error2) {
     const apiError = {
       message: "An unexpected error occurred",
-      statusCode: error.response?.status
+      statusCode: error2.response?.status
     };
-    if (error.response) {
-      const data = error.response.data;
-      apiError.message = data?.message || data?.errorMessage || error.message;
+    if (error2.response) {
+      const data = error2.response.data;
+      apiError.message = data?.message || data?.errorMessage || error2.message;
       apiError.code = data?.errorType || data?.code;
       apiError.details = data;
-    } else if (error.request) {
+    } else if (error2.request) {
       apiError.message = "No response from server";
       apiError.code = "NETWORK_ERROR";
     } else {
-      apiError.message = error.message;
+      apiError.message = error2.message;
       apiError.code = "REQUEST_ERROR";
     }
     return apiError;
@@ -8120,6 +14233,65 @@ var BizuitHttpClient = class {
    */
   async delete(url, config) {
     const response = await this.axiosInstance.delete(url, config);
+    return response.data;
+  }
+  /**
+   * Convert IBizuitFile to File object
+   */
+  convertToFile(bizuitFile) {
+    const { fileName, content, mimeType, encoding } = bizuitFile;
+    if (content instanceof File) {
+      return content;
+    }
+    if (content instanceof Blob) {
+      return new File([content], fileName, { type: mimeType || content.type });
+    }
+    if (content instanceof ArrayBuffer) {
+      return new File([content], fileName, { type: mimeType || "application/octet-stream" });
+    }
+    if (typeof content === "string") {
+      try {
+        const base64String = content.includes(",") ? content.split(",")[1] : content;
+        const binaryString = atob(base64String);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        return new File([bytes], fileName, { type: mimeType || "application/octet-stream" });
+      } catch (error2) {
+        throw new Error(`Failed to decode base64 string for file ${fileName}: ${error2}`);
+      }
+    }
+    throw new Error(`Unsupported content type for file ${fileName}`);
+  }
+  /**
+   * POST request with multipart/form-data for Dashboard API file uploads
+   * - Encodes JSON data as Base64 in 'data' field
+   * - Appends files with their actual filenames
+   * - Supports both File[] and IBizuitFile[] for flexible file sources
+   */
+  async postMultipart(url, data, files, config) {
+    const formData = new FormData();
+    const jsonString = JSON.stringify(data);
+    const base64Data = btoa(jsonString);
+    formData.append("data", base64Data);
+    const fileObjects = files.map((file) => {
+      if (file instanceof File) {
+        return file;
+      }
+      return this.convertToFile(file);
+    });
+    fileObjects.forEach((file) => {
+      formData.append(file.name, file, file.name);
+    });
+    const requestConfig = {
+      ...config,
+      headers: {
+        ...config?.headers,
+        "Content-Type": "multipart/form-data"
+      }
+    };
+    const response = await this.axiosInstance.post(url, formData, requestConfig);
     return response.data;
   }
   /**
@@ -8190,12 +14362,12 @@ var BizuitAuthService = class {
         { headers }
       );
       return response;
-    } catch (error) {
+    } catch (error2) {
       return {
         success: false,
-        canRetry: error.statusCode !== 401,
-        errorMessage: error.message,
-        errorType: error.code
+        canRetry: error2.statusCode !== 401,
+        errorMessage: error2.message,
+        errorType: error2.code
       };
     }
   }
@@ -8232,8 +14404,8 @@ var BizuitAuthService = class {
       const userName = decoded.split(":")[0];
       const userInfo = await this.getUserInfo(token, userName);
       return userInfo;
-    } catch (error) {
-      console.error("[BizuitAuthService] Token validation failed:", error);
+    } catch (error2) {
+      console.error("[BizuitAuthService] Token validation failed:", error2);
       return null;
     }
   }
@@ -8247,8 +14419,8 @@ var BizuitAuthService = class {
         return true;
       }
       return requiredRoles.some((role) => userInfo.roles.includes(role));
-    } catch (error) {
-      console.error("[BizuitAuthService] Permission check failed:", error);
+    } catch (error2) {
+      console.error("[BizuitAuthService] Permission check failed:", error2);
       return false;
     }
   }
@@ -8318,13 +14490,13 @@ var BizuitAuthService = class {
         ExpirationDate: response.expirationDate
       };
       return loginResponse;
-    } catch (error) {
-      if (error.statusCode === 401) {
+    } catch (error2) {
+      if (error2.statusCode === 401) {
         throw new Error("Nombre de Usuario y/o Contrase\xF1a incorrectos.");
-      } else if (error.statusCode === 403) {
+      } else if (error2.statusCode === 403) {
         throw new Error("Acceso denegado, no tiene permiso para acceder.");
       }
-      throw error;
+      throw error2;
     }
   }
 };
@@ -8382,11 +14554,508 @@ function xmlToJson(xmlString) {
       [rootTagName]: xmlNodeToJson(rootElement)
     };
     return result;
-  } catch (error) {
-    console.error("Error converting XML to JSON:", error);
+  } catch (error2) {
+    console.error("Error converting XML to JSON:", error2);
     return null;
   }
 }
+function jsonToXml(obj, options = {}) {
+  const { indent = 2, currentIndent = 0 } = options;
+  try {
+    if (obj === null || obj === void 0) {
+      return "";
+    }
+    if (typeof obj !== "object") {
+      return String(obj);
+    }
+    const keys = Object.keys(obj);
+    if (keys.length === 0) {
+      return "";
+    }
+    const rootKey = keys[0];
+    const rootValue = obj[rootKey];
+    return buildXmlNode(rootKey, rootValue, indent, currentIndent);
+  } catch (error2) {
+    console.error("Error converting JSON to XML:", error2);
+    return "";
+  }
+}
+function buildXmlNode(tagName, value, indent, currentIndent) {
+  const indentStr = " ".repeat(currentIndent);
+  const childIndentStr = " ".repeat(currentIndent + indent);
+  if (value === null || value === void 0) {
+    return `${indentStr}<${tagName}></${tagName}>`;
+  }
+  if (typeof value !== "object") {
+    return `${indentStr}<${tagName}>${escapeXml(String(value))}</${tagName}>`;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => buildXmlNode(tagName, item, indent, currentIndent)).join("\n");
+  }
+  const childKeys = Object.keys(value);
+  if (childKeys.length === 0) {
+    return `${indentStr}<${tagName}></${tagName}>`;
+  }
+  const childNodes = childKeys.map((key) => {
+    const childValue = value[key];
+    return buildXmlNode(key, childValue, indent, currentIndent + indent);
+  }).join("\n");
+  return `${indentStr}<${tagName}>
+${childNodes}
+${indentStr}</${tagName}>`;
+}
+function escapeXml(str) {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+function parseXsdToTemplate(xsdString) {
+  if (!xsdString || typeof xsdString !== "string") {
+    console.warn("Invalid XSD string provided");
+    return {};
+  }
+  try {
+    const parser = new DOMParser();
+    const xmlDoc = parser.parseFromString(xsdString, "text/xml");
+    const parserError = xmlDoc.querySelector("parsererror");
+    if (parserError) {
+      console.error("XSD parsing error:", parserError.textContent);
+      return {};
+    }
+    const rootElement = xmlDoc.querySelector("schema > element, xs\\:schema > xs\\:element");
+    if (!rootElement) {
+      console.warn("No root element found in XSD");
+      return {};
+    }
+    const rootName = rootElement.getAttribute("name");
+    if (!rootName) {
+      console.warn("Root element has no name");
+      return {};
+    }
+    const rootValue = parseElement(rootElement, xmlDoc);
+    return { [rootName]: rootValue };
+  } catch (error2) {
+    console.error("Error parsing XSD:", error2);
+    return {};
+  }
+}
+function parseElement(element, xmlDoc) {
+  const elementType = element.getAttribute("type");
+  const minOccurs = element.getAttribute("minOccurs");
+  const maxOccurs = element.getAttribute("maxOccurs");
+  const isArray2 = maxOccurs === "unbounded" || maxOccurs && parseInt(maxOccurs, 10) > 1;
+  const complexType = element.querySelector(":scope > complexType, :scope > xs\\:complexType");
+  if (complexType) {
+    const value = parseComplexType(complexType, xmlDoc);
+    return isArray2 ? [value] : value;
+  }
+  if (elementType) {
+    const value = parseType(elementType, xmlDoc);
+    return isArray2 ? [value] : value;
+  }
+  return isArray2 ? [] : null;
+}
+function parseComplexType(complexType, xmlDoc) {
+  const result = {};
+  const sequence = complexType.querySelector(":scope > sequence, :scope > xs\\:sequence");
+  if (sequence) {
+    const elements = sequence.querySelectorAll(":scope > element, :scope > xs\\:element");
+    elements.forEach((el) => {
+      const name = el.getAttribute("name");
+      if (name) {
+        result[name] = parseElement(el, xmlDoc);
+      }
+    });
+    return result;
+  }
+  const all3 = complexType.querySelector(":scope > all, :scope > xs\\:all");
+  if (all3) {
+    const elements = all3.querySelectorAll(":scope > element, :scope > xs\\:element");
+    elements.forEach((el) => {
+      const name = el.getAttribute("name");
+      if (name) {
+        result[name] = parseElement(el, xmlDoc);
+      }
+    });
+    return result;
+  }
+  const choice = complexType.querySelector(":scope > choice, :scope > xs\\:choice");
+  if (choice) {
+    const firstElement = choice.querySelector(":scope > element, :scope > xs\\:element");
+    if (firstElement) {
+      const name = firstElement.getAttribute("name");
+      if (name) {
+        result[name] = parseElement(firstElement, xmlDoc);
+      }
+    }
+    return result;
+  }
+  return result;
+}
+function parseType(typeName, xmlDoc) {
+  const builtInTypes = {
+    "xs:string": null,
+    "xs:integer": null,
+    "xs:int": null,
+    "xs:long": null,
+    "xs:short": null,
+    "xs:byte": null,
+    "xs:decimal": null,
+    "xs:float": null,
+    "xs:double": null,
+    "xs:boolean": null,
+    "xs:date": null,
+    "xs:time": null,
+    "xs:dateTime": null,
+    "string": null,
+    "integer": null,
+    "int": null,
+    "long": null,
+    "short": null,
+    "byte": null,
+    "decimal": null,
+    "float": null,
+    "double": null,
+    "boolean": null,
+    "date": null,
+    "time": null,
+    "dateTime": null
+  };
+  if (typeName in builtInTypes) {
+    return builtInTypes[typeName];
+  }
+  const typeDefinition = xmlDoc.querySelector(
+    `complexType[name="${typeName}"], xs\\:complexType[name="${typeName}"]`
+  );
+  if (typeDefinition) {
+    return parseComplexType(typeDefinition, xmlDoc);
+  }
+  return null;
+}
+var _XmlParameter = class _XmlParameter2 {
+  /**
+   * Creates a new XmlParameter instance
+   *
+   * @param name - Parameter name (e.g., 'pSampleXml')
+   * @param template - Object template representing the XML structure
+   * @param direction - Parameter direction (default: 'In')
+   *
+   * @example
+   * ```typescript
+   * const param = new XmlParameter('pDeudor', {
+   *   deudor: {
+   *     datosPersonales: {
+   *       id: null,
+   *       nombre: null
+   *     },
+   *     contactos: {
+   *       contacto: []
+   *     }
+   *   }
+   * }, 'In')
+   *
+   * // Direct property access via Proxy
+   * param.deudor.datosPersonales.nombre = 'Juan Perez'
+   * ```
+   */
+  constructor(name, template, direction = "In") {
+    this._type = "Xml";
+    this._name = name;
+    this._data = this._deepClone(template);
+    this._direction = direction;
+    this._originalTemplate = this._deepClone(template);
+    this[_XmlParameter2.TYPE_SYMBOL] = true;
+    return new Proxy(this, {
+      get(target, prop) {
+        if (prop in target) {
+          return target[prop];
+        }
+        if (prop in target._data) {
+          return target._data[prop];
+        }
+        return void 0;
+      },
+      set(target, prop, value) {
+        if (typeof prop === "string" && prop.startsWith("_")) {
+          ;
+          target[prop] = value;
+          return true;
+        }
+        if (prop in target) {
+          return false;
+        }
+        if (typeof prop === "string") {
+          target._data[prop] = value;
+          return true;
+        }
+        return false;
+      },
+      has(target, prop) {
+        return prop in target || prop in target._data;
+      },
+      ownKeys(target) {
+        return [...Reflect.ownKeys(target), ...Object.keys(target._data)];
+      },
+      getOwnPropertyDescriptor(target, prop) {
+        if (prop in target._data) {
+          return {
+            enumerable: true,
+            configurable: true,
+            value: target._data[prop]
+          };
+        }
+        return Reflect.getOwnPropertyDescriptor(target, prop);
+      }
+    });
+  }
+  /**
+   * Converts XmlParameter to IParameter format for ProcessService
+   *
+   * @returns IParameter object ready to send to Bizuit API
+   */
+  toParameter() {
+    return {
+      name: this._name,
+      value: this._data,
+      type: this._type,
+      direction: this._direction
+    };
+  }
+  /**
+   * Gets the parameter name
+   */
+  getName() {
+    return this._name;
+  }
+  /**
+   * Gets the raw data object
+   */
+  getData() {
+    return this._data;
+  }
+  /**
+   * Gets the parameter direction
+   */
+  getDirection() {
+    return this._direction;
+  }
+  /**
+   * Resets the parameter data to the original template
+   */
+  reset() {
+    this._data = this._deepClone(this._originalTemplate);
+  }
+  /**
+   * Creates a deep clone of the XmlParameter
+   *
+   * @returns New XmlParameter instance with cloned data
+   */
+  clone() {
+    return new _XmlParameter2(this._name, this._deepClone(this._data), this._direction);
+  }
+  /**
+   * Converts the parameter data to JSON string
+   */
+  toJSON() {
+    return JSON.stringify(this._data, null, 2);
+  }
+  /**
+   * Merges data from another object into this XmlParameter
+   *
+   * @param data - Object or XmlParameter to merge
+   * @param deep - Deep merge (default: true)
+   *
+   * @example
+   * ```typescript
+   * const param = new XmlParameter('pData', { raiz: { nombre: null, edad: null } })
+   * param.merge({ raiz: { nombre: 'Juan' } })
+   * // Result: { raiz: { nombre: 'Juan', edad: null } }
+   * ```
+   */
+  merge(data, deep = true) {
+    const sourceData = _XmlParameter2.isXmlParameter(data) ? data.getData() : data;
+    if (deep) {
+      this._data = this._deepMerge(this._data, sourceData);
+    } else {
+      this._data = { ...this._data, ...sourceData };
+    }
+  }
+  /**
+   * Validates that all required fields have values (not null/undefined)
+   *
+   * @param schema - Optional schema object defining required fields
+   * @returns Array of missing field paths
+   *
+   * @example
+   * ```typescript
+   * const param = new XmlParameter('pData', { raiz: { nombre: null, edad: 30 } })
+   * param.raiz.nombre = 'Juan'
+   * const missing = param.validate()
+   * // Returns: [] (all fields filled)
+   *
+   * param.raiz.nombre = null
+   * const missing2 = param.validate()
+   * // Returns: ['raiz.nombre'] (missing field)
+   * ```
+   */
+  validate(schema) {
+    const missingFields = [];
+    const checkObject = (obj, path = "") => {
+      for (const key in obj) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) {
+          const value = obj[key];
+          const currentPath = path ? `${path}.${key}` : key;
+          if (value === null || value === void 0) {
+            missingFields.push(currentPath);
+          } else if (typeof value === "object" && !Array.isArray(value)) {
+            checkObject(value, currentPath);
+          } else if (Array.isArray(value) && value.length === 0) {
+            missingFields.push(currentPath);
+          }
+        }
+      }
+    };
+    checkObject(this._data);
+    return missingFields;
+  }
+  /**
+   * Fills the parameter with data from a source object
+   * Useful for mapping form data to parameter structure
+   *
+   * @param source - Source data object
+   * @param mapping - Optional field mapping { sourceField: targetPath }
+   *
+   * @example
+   * ```typescript
+   * const param = new XmlParameter('pDeudor', {
+   *   Deudor: { ID: null, Nombre: null, Contactos: { Contacto: [] } }
+   * })
+   *
+   * param.fillFrom(
+   *   { id: 123, nombre: 'Juan', email: 'juan@example.com' },
+   *   {
+   *     id: 'Deudor.ID',
+   *     nombre: 'Deudor.Nombre',
+   *     email: 'Deudor.Contactos.Contacto[0].Valor'
+   *   }
+   * )
+   * ```
+   */
+  fillFrom(source, mapping) {
+    if (!mapping) {
+      this._data = this._deepClone(source);
+      return;
+    }
+    for (const sourceKey in mapping) {
+      if (Object.prototype.hasOwnProperty.call(source, sourceKey)) {
+        const targetPath = mapping[sourceKey];
+        const value = source[sourceKey];
+        this._setByPath(targetPath, value);
+      }
+    }
+  }
+  /**
+   * Gets a value by path (dot notation)
+   *
+   * @param path - Path in dot notation (e.g., 'raiz.productos.producto[0].codigo')
+   * @returns Value at path or undefined
+   */
+  getByPath(path) {
+    return this._getByPath(this._data, path);
+  }
+  /**
+   * Sets a value by path (dot notation)
+   *
+   * @param path - Path in dot notation
+   * @param value - Value to set
+   */
+  setByPath(path, value) {
+    this._setByPath(path, value);
+  }
+  /**
+   * Deep clone helper
+   */
+  _deepClone(obj) {
+    if (obj === null || typeof obj !== "object") {
+      return obj;
+    }
+    if (Array.isArray(obj)) {
+      return obj.map((item) => this._deepClone(item));
+    }
+    const cloned = {};
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        cloned[key] = this._deepClone(obj[key]);
+      }
+    }
+    return cloned;
+  }
+  /**
+   * Deep merge helper
+   */
+  _deepMerge(target, source) {
+    if (source === null || source === void 0) {
+      return target;
+    }
+    if (typeof source !== "object" || Array.isArray(source)) {
+      return source;
+    }
+    const result = this._deepClone(target);
+    for (const key in source) {
+      if (Object.prototype.hasOwnProperty.call(source, key)) {
+        if (source[key] && typeof source[key] === "object" && !Array.isArray(source[key])) {
+          result[key] = this._deepMerge(result[key] || {}, source[key]);
+        } else {
+          result[key] = source[key];
+        }
+      }
+    }
+    return result;
+  }
+  /**
+   * Get value by path helper
+   */
+  _getByPath(obj, path) {
+    const parts = path.replace(/\[(\d+)\]/g, ".$1").split(".");
+    let current = obj;
+    for (const part of parts) {
+      if (current === null || current === void 0) {
+        return void 0;
+      }
+      current = current[part];
+    }
+    return current;
+  }
+  /**
+   * Set value by path helper
+   */
+  _setByPath(path, value) {
+    const parts = path.replace(/\[(\d+)\]/g, ".$1").split(".");
+    let current = this._data;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      const nextPart = parts[i + 1];
+      if (!(part in current)) {
+        current[part] = /^\d+$/.test(nextPart) ? [] : {};
+      }
+      current = current[part];
+    }
+    const lastPart = parts[parts.length - 1];
+    current[lastPart] = value;
+  }
+  /**
+   * Static helper to check if an object is an XmlParameter instance
+   *
+   * @param obj - Object to check
+   * @returns true if obj is an XmlParameter instance
+   */
+  static isXmlParameter(obj) {
+    if (!obj || typeof obj !== "object") {
+      return false;
+    }
+    return _XmlParameter2.TYPE_SYMBOL in obj;
+  }
+};
+_XmlParameter.TYPE_SYMBOL = Symbol("BizuitXmlParameter");
+var XmlParameter = _XmlParameter;
 var BizuitProcessService = class {
   constructor(config) {
     this.client = new BizuitHttpClient(config);
@@ -8394,14 +15063,12 @@ var BizuitProcessService = class {
   }
   /**
    * Initialize process - Get parameters for new or existing instance
-   * Uses standard Authorization header as per API specification
+   * Uses the Dashboard API endpoint: /eventmanager/workflowDefinition/parameters/{processName}
+   *
+   * This method fetches the process parameter schema and transforms it to IProcessData format.
+   * For existing instances, use getInstanceData() to get parameter values.
    */
   async initialize(params) {
-    const queryParams = new URLSearchParams();
-    queryParams.append("processName", params.processName);
-    if (params.activityName) queryParams.append("activityName", params.activityName);
-    if (params.version) queryParams.append("version", params.version);
-    if (params.instanceId) queryParams.append("instanceId", params.instanceId);
     const headers = {};
     if (params.token) {
       headers["Authorization"] = params.token;
@@ -8427,11 +15094,58 @@ var BizuitProcessService = class {
     if (params.childProcessName) {
       headers["BZ-CHILD-PROCESS-NAME"] = params.childProcessName;
     }
-    const processData = await this.client.get(
-      `${this.apiUrl}/Process/Initialize?${queryParams.toString()}`,
-      { headers }
-    );
+    const url = `${this.apiUrl}/eventmanager/workflowDefinition/parameters/${encodeURIComponent(params.processName)}?version=${encodeURIComponent(params.version || "")}`;
+    const response = await this.client.get(url, { headers });
+    let rawParameters = [];
+    if (Array.isArray(response)) {
+      rawParameters = response;
+    } else if (response && typeof response === "object") {
+      if (Array.isArray(response.parameters)) {
+        rawParameters = response.parameters;
+      } else if (Array.isArray(response.Parameters)) {
+        rawParameters = response.Parameters;
+      } else if (Array.isArray(response.data)) {
+        rawParameters = response.data;
+      } else {
+        console.warn("[BizuitSDK] Unexpected response format from parameters endpoint:", response);
+      }
+    }
+    const processData = {
+      processName: params.processName,
+      version: params.version || "",
+      instanceId: params.instanceId,
+      parameters: rawParameters.map((p) => ({
+        name: p.name,
+        value: null,
+        // Start forms have empty values
+        type: this.mapParameterType(p.parameterType),
+        direction: this.mapParameterDirection(p.parameterDirection),
+        schema: p.schema,
+        isVariable: p.isVariable,
+        isSystemParameter: p.isSystemParameter,
+        parameterType: p.parameterType
+      }))
+    };
     return processData;
+  }
+  /**
+   * Map numeric parameter type to string
+   */
+  mapParameterType(type) {
+    return type === 2 ? "Xml" : "SingleValue";
+  }
+  /**
+   * Map numeric parameter direction to string
+   */
+  mapParameterDirection(direction) {
+    switch (direction) {
+      case 2:
+        return "Out";
+      case 3:
+        return "InOut";
+      default:
+        return "In";
+    }
   }
   /**
    * Start process - Execute process or start new instance
@@ -8460,9 +15174,29 @@ var BizuitProcessService = class {
     if (token) {
       headers["Authorization"] = token;
     }
+    const processedParameters = (params.parameters || []).map((param) => {
+      if (XmlParameter.isXmlParameter(param)) {
+        const iParam = param.toParameter();
+        const xmlString = jsonToXml(iParam.value);
+        console.log(`\u2705 Auto-converted XmlParameter "${iParam.name}" to XML`);
+        return {
+          ...iParam,
+          value: xmlString
+        };
+      }
+      if (param.type === "Xml" && typeof param.value === "object" && param.value !== null) {
+        const xmlString = jsonToXml(param.value);
+        console.log(`\u2705 Auto-converted parameter "${param.name}" from object to XML`);
+        return {
+          ...param,
+          value: xmlString
+        };
+      }
+      return param;
+    });
     const payload = {
       eventName: params.processName,
-      parameters: params.parameters || []
+      parameters: processedParameters
     };
     if (params.instanceId) {
       payload.instanceId = params.instanceId;
@@ -8476,14 +15210,25 @@ var BizuitProcessService = class {
     if (params.deletedDocuments && params.deletedDocuments.length > 0) {
       payload.deletedDocuments = params.deletedDocuments;
     }
-    if (files && files.length > 0) {
-      console.warn("File upload in start is not yet implemented in JSON mode");
+    const filesToUpload = params.files || files;
+    let result;
+    if (filesToUpload && filesToUpload.length > 0) {
+      if (!token) {
+        throw new Error("Token is required for file uploads. Make sure to pass dashboardParams.token to startProcess/continueProcess.");
+      }
+      result = await this.client.postMultipart(
+        `${this.apiUrl}/instances/RaiseEvent`,
+        payload,
+        filesToUpload,
+        { headers: { "BZ-AUTH-TOKEN": token } }
+      );
+    } else {
+      result = await this.client.post(
+        `${this.apiUrl}/instances`,
+        payload,
+        { headers }
+      );
     }
-    const result = await this.client.post(
-      `${this.apiUrl}/instances`,
-      payload,
-      { headers }
-    );
     const parametersArray = result.tyconParameters || result.parameters;
     if (parametersArray && Array.isArray(parametersArray)) {
       parametersArray.forEach((param) => {
@@ -8497,8 +15242,8 @@ var BizuitProcessService = class {
             } else {
               console.warn(`\u26A0\uFE0F Failed to parse XML parameter: ${param.name}, keeping original XML`);
             }
-          } catch (error) {
-            console.warn(`\u26A0\uFE0F Error parsing XML parameter ${param.name}:`, error);
+          } catch (error2) {
+            console.warn(`\u26A0\uFE0F Error parsing XML parameter ${param.name}:`, error2);
           }
         }
       });
@@ -8521,13 +15266,13 @@ var BizuitProcessService = class {
    * - parameterDirection: 1 (In), 2 (Out), 3 (Optional)
    * - name, type, schema, isSystemParameter, isVariable
    */
-  async getParameters(processName, version2, token) {
+  async getParameters(processName, version3, token) {
     const headers = {};
     if (token) {
       headers["Authorization"] = token;
     }
     const queryParams = new URLSearchParams();
-    queryParams.append("version", version2 || "");
+    queryParams.append("version", version3 || "");
     const url = `${this.apiUrl}/eventmanager/workflowDefinition/parameters/${processName}?${queryParams.toString()}`;
     const parameters = await this.client.get(url, { headers });
     return parameters;
@@ -8603,9 +15348,29 @@ var BizuitProcessService = class {
     if (token) {
       headers["Authorization"] = token;
     }
+    const processedParameters = (params.parameters || []).map((param) => {
+      if (XmlParameter.isXmlParameter(param)) {
+        const iParam = param.toParameter();
+        const xmlString = jsonToXml(iParam.value);
+        console.log(`\u2705 Auto-converted XmlParameter "${iParam.name}" to XML`);
+        return {
+          ...iParam,
+          value: xmlString
+        };
+      }
+      if (param.type === "Xml" && typeof param.value === "object" && param.value !== null) {
+        const xmlString = jsonToXml(param.value);
+        console.log(`\u2705 Auto-converted parameter "${param.name}" from object to XML`);
+        return {
+          ...param,
+          value: xmlString
+        };
+      }
+      return param;
+    });
     const payload = {
       eventName: params.processName,
-      parameters: params.parameters || [],
+      parameters: processedParameters,
       instanceId: params.instanceId
     };
     if (params.processVersion) {
@@ -8617,14 +15382,25 @@ var BizuitProcessService = class {
     if (params.deletedDocuments && params.deletedDocuments.length > 0) {
       payload.deletedDocuments = params.deletedDocuments;
     }
-    if (files && files.length > 0) {
-      console.warn("File upload in continue is not yet implemented in JSON mode");
+    const filesToUpload = params.files || files;
+    let result;
+    if (filesToUpload && filesToUpload.length > 0) {
+      if (!token) {
+        throw new Error("Token is required for file uploads. Make sure to pass dashboardParams.token to startProcess/continueProcess.");
+      }
+      result = await this.client.postMultipart(
+        `${this.apiUrl}/instances/RaiseEvent`,
+        payload,
+        filesToUpload,
+        { headers: { "BZ-AUTH-TOKEN": token } }
+      );
+    } else {
+      result = await this.client.put(
+        `${this.apiUrl}/instances`,
+        payload,
+        { headers }
+      );
     }
-    const result = await this.client.put(
-      `${this.apiUrl}/instances`,
-      payload,
-      { headers }
-    );
     const parametersArray = result.tyconParameters || result.parameters;
     if (parametersArray && Array.isArray(parametersArray)) {
       parametersArray.forEach((param) => {
@@ -8638,14 +15414,73 @@ var BizuitProcessService = class {
             } else {
               console.warn(`\u26A0\uFE0F Failed to parse XML parameter: ${param.name}, keeping original XML`);
             }
-          } catch (error) {
-            console.warn(`\u26A0\uFE0F Error parsing XML parameter ${param.name}:`, error);
+          } catch (error2) {
+            console.warn(`\u26A0\uFE0F Error parsing XML parameter ${param.name}:`, error2);
           }
         }
       });
       if (result.tyconParameters) {
         result.parameters = parametersArray;
       }
+    }
+    return result;
+  }
+  /**
+   * Get process parameters as XmlParameter objects (NEW in v2.1.0)
+   *
+   * Returns parameters wrapped in XmlParameter instances, allowing direct property access:
+   *
+   * @example
+   * ```typescript
+   * const params = await sdk.process.getParametersAsObjects({
+   *   processName: 'MyProcess',
+   *   token: authToken
+   * })
+   *
+   * // Direct property modification via Proxy
+   * params.pSampleXml.nodo1 = 'a'
+   * params.pSampleXml.productos[0].codigo = 'ABC'
+   *
+   * // Send directly to process
+   * await sdk.process.start({
+   *   processName: 'MyProcess',
+   *   parameters: [params.pSampleXml]  // SDK auto-converts
+   * }, [], token)
+   * ```
+   *
+   * @param params - Initialize parameters (processName, version, etc.)
+   * @returns Object with parameter names as keys, XmlParameter instances as values
+   */
+  async getParametersAsObjects(params) {
+    const processData = await this.initialize(params);
+    const result = {};
+    if (processData.parameters && Array.isArray(processData.parameters)) {
+      processData.parameters.forEach((param) => {
+        if (param.parameterType === 2 || param.parameterType === "Xml") {
+          const paramName = param.name;
+          let direction = "In";
+          if (param.parameterDirection === 2 || param.parameterDirection === "Out") {
+            direction = "Out";
+          } else if (param.parameterDirection === 3 || param.parameterDirection === "InOut") {
+            direction = "InOut";
+          }
+          let template = {};
+          if (param.schema && typeof param.schema === "string") {
+            try {
+              template = parseXsdToTemplate(param.schema);
+              console.log(`\u2705 Generated template from XSD for parameter: ${paramName}`);
+            } catch (error2) {
+              console.warn(`\u26A0\uFE0F Failed to parse XSD for ${paramName}, using empty template:`, error2);
+              template = {};
+            }
+          } else {
+            console.log(`\u2139\uFE0F No XSD schema for parameter ${paramName}, using empty template`);
+            template = {};
+          }
+          const xmlParam = new XmlParameter(paramName, template, direction);
+          result[paramName] = xmlParam;
+        }
+      });
     }
     return result;
   }
@@ -8665,6 +15500,62 @@ var BizuitProcessService = class {
       { headers }
     );
     return result;
+  }
+  /**
+   * Get instance documents
+   * Returns list of documents attached to an instance
+   *
+   * Example:
+   * GET /api/instances/{instanceId}/documents
+   * BZ-AUTH-TOKEN: token
+   *
+   * @param instanceId - Instance ID
+   * @param token - Authentication token
+   * @returns Array of document metadata with ID, FileName, Size, Version, etc.
+   */
+  async getDocuments(instanceId, token) {
+    const headers = {};
+    if (token) {
+      headers["BZ-AUTH-TOKEN"] = token;
+    }
+    try {
+      const response = await this.client.get(
+        `${this.apiUrl}/instances/${instanceId}/documents`,
+        { headers }
+      );
+      return response || [];
+    } catch (error2) {
+      console.error("Error fetching instance documents:", error2);
+      return [];
+    }
+  }
+  /**
+   * Download a document from an instance
+   * Returns the document as a Blob
+   *
+   * Example:
+   * GET /api/instances/documents/{documentId}/{version}
+   * BZ-AUTH-TOKEN: token
+   * Response: Binary data (Blob)
+   *
+   * @param documentId - Document ID
+   * @param version - Document version
+   * @param token - Authentication token
+   * @returns Document blob
+   */
+  async downloadDocument(documentId, version3, token) {
+    const headers = {};
+    if (token) {
+      headers["BZ-AUTH-TOKEN"] = token;
+    }
+    const response = await this.client.get(
+      `${this.apiUrl}/instances/documents/${documentId}/${version3}`,
+      {
+        headers,
+        responseType: "blob"
+      }
+    );
+    return response;
   }
 };
 var BizuitInstanceLockService = class {
@@ -9169,6 +16060,631 @@ var BizuitFormService = class {
     }));
   }
 };
+var BizuitDataServiceService = class {
+  constructor(config) {
+    this.client = new BizuitHttpClient(config);
+    this.apiUrl = config.apiUrl;
+  }
+  /**
+   * Execute a DataService query
+   *
+   * @example
+   * ```typescript
+   * // Get list of rejection types
+   * const result = await sdk.dataService.execute<RejectionType>({
+   *   id: 42,
+   *   parameters: [
+   *     { name: 'status', value: 'active' }
+   *   ]
+   * }, token)
+   *
+   * console.log(result.data) // Array of RejectionType[]
+   * ```
+   */
+  async execute(request, token) {
+    const { id, parameters = [], withoutCache = false, executeFromGlobal = false } = request;
+    const queryParams = new URLSearchParams({
+      withoutCache: String(withoutCache),
+      executeFromGlobal: String(executeFromGlobal)
+    });
+    const body = {
+      id,
+      parameters: parameters.map((p) => ({
+        name: p.name,
+        value: p.value,
+        isGroupBy: p.isGroupBy ?? false
+      }))
+    };
+    try {
+      const response = await this.client.post(
+        `${this.apiUrl}/Dashboard/DataService/Execute?${queryParams.toString()}`,
+        body,
+        {
+          headers: {
+            "bz-auth-token": `Basic ${token}`
+          }
+        }
+      );
+      let flattenedData = [];
+      if (response.gridData && Array.isArray(response.gridData) && response.gridData.length > 0) {
+        const gridTable = response.gridData[0];
+        if (gridTable.rows && Array.isArray(gridTable.rows)) {
+          flattenedData = gridTable.rows.map((row) => {
+            const obj = {};
+            if (row.columns && Array.isArray(row.columns)) {
+              row.columns.forEach((col) => {
+                if (col.columnInfo && col.columnInfo.columnName) {
+                  obj[col.columnInfo.columnName] = col.value;
+                }
+              });
+            }
+            return obj;
+          });
+        }
+      }
+      return {
+        data: flattenedData,
+        success: true
+      };
+    } catch (error2) {
+      return {
+        data: [],
+        success: false,
+        errorMessage: error2.message,
+        errorType: error2.code
+      };
+    }
+  }
+  /**
+   * Helper to create DataService parameters
+   *
+   * @example
+   * ```typescript
+   * const params = sdk.dataService.createParameters([
+   *   { name: 'customerId', value: 'ALFKI' },
+   *   { name: 'year', value: 2024 }
+   * ])
+   * ```
+   */
+  createParameters(params) {
+    return params.map((p) => ({
+      name: p.name,
+      value: p.value,
+      isGroupBy: p.isGroupBy ?? false
+    }));
+  }
+  /**
+   * Execute multiple DataService queries in parallel
+   *
+   * @example
+   * ```typescript
+   * const [rejectionTypes, statusList] = await sdk.dataService.executeMany([
+   *   { id: 42, parameters: [] },
+   *   { id: 43, parameters: [] }
+   * ], token)
+   * ```
+   */
+  async executeMany(requests, token) {
+    const promises = requests.map((request) => this.execute(request, token));
+    return Promise.all(promises);
+  }
+  /**
+   * Get all DataServices for a specific tab module (page)
+   *
+   * @example
+   * ```typescript
+   * const dataServices = await sdk.dataService.getByTabModuleId(1018, token)
+   * console.log(dataServices) // Array of IDataServiceMetadata
+   *
+   * // Find by name
+   * const rejectionDS = dataServices.find(ds => ds.name === 'Motivos de Rechazo')
+   * if (rejectionDS) {
+   *   const result = await sdk.dataService.execute({ id: rejectionDS.id }, token)
+   * }
+   * ```
+   */
+  async getByTabModuleId(tabModuleId, token) {
+    try {
+      const response = await this.client.get(
+        `${this.apiUrl}/Dashboard/DataService/GetByTabModuleId?tabModuleId=${tabModuleId}`,
+        {
+          headers: {
+            "Authorization": token
+            // Token already includes "Basic " prefix from login
+          }
+        }
+      );
+      if (response && response.configuration && Array.isArray(response.configuration.grid)) {
+        return response.configuration.grid.map((item) => ({
+          id: item.id,
+          name: item.title,
+          // 'title' is the DataService name
+          tabModuleId: response.tabModuleID,
+          uniqueId: item.uniqueId,
+          cacheTime: item.cacheTime,
+          isGlobalParams: item.isGlobalParams,
+          isActive: true
+          // Assume active if in grid
+        }));
+      }
+      return [];
+    } catch (error2) {
+      console.error("Error fetching DataServices by tabModuleId:", error2);
+      return [];
+    }
+  }
+  /**
+   * Execute a DataService by name (instead of ID)
+   * Automatically finds the DataService ID from the tab module and executes it
+   *
+   * @example
+   * ```typescript
+   * // Developer only needs to know:
+   * // 1. Tab module ID (page ID) - stable across environments
+   * // 2. DataService name - descriptive, human-readable
+   *
+   * const result = await sdk.dataService.executeByName<RejectionType>({
+   *   tabModuleId: 1018,
+   *   dataServiceName: 'Motivos de Rechazo',
+   *   parameters: [
+   *     { name: 'status', value: 'active' }
+   *   ]
+   * }, token)
+   *
+   * if (result.success) {
+   *   console.log(result.data) // RejectionType[]
+   * }
+   * ```
+   */
+  async executeByName(request, token) {
+    const { tabModuleId, dataServiceName, parameters = [], withoutCache = false, executeFromGlobal = false } = request;
+    try {
+      const dataServices = await this.getByTabModuleId(tabModuleId, token);
+      const dataService = dataServices.find((ds) => ds.name === dataServiceName);
+      if (!dataService) {
+        return {
+          data: [],
+          success: false,
+          errorMessage: `DataService '${dataServiceName}' not found in tab module ${tabModuleId}`,
+          errorType: "DS_NOT_FOUND"
+        };
+      }
+      return await this.execute({
+        id: dataService.id,
+        parameters,
+        withoutCache,
+        executeFromGlobal
+      }, token);
+    } catch (error2) {
+      return {
+        data: [],
+        success: false,
+        errorMessage: error2.message,
+        errorType: error2.code
+      };
+    }
+  }
+  /**
+   * Find a DataService by name in a tab module
+   * Returns the DataService metadata without executing it
+   *
+   * @example
+   * ```typescript
+   * const dataService = await sdk.dataService.findByName(1018, 'Motivos de Rechazo', token)
+   *
+   * if (dataService) {
+   *   console.log(`Found DataService ID: ${dataService.id}`)
+   *   // Can now execute it multiple times without re-fetching metadata
+   *   const result = await sdk.dataService.execute({ id: dataService.id }, token)
+   * }
+   * ```
+   */
+  async findByName(tabModuleId, dataServiceName, token) {
+    const dataServices = await this.getByTabModuleId(tabModuleId, token);
+    return dataServices.find((ds) => ds.name === dataServiceName) || null;
+  }
+  /**
+   * Get all pages from Dashboard
+   *
+   * @example
+   * ```typescript
+   * const pages = await sdk.dataService.getPages(token)
+   * console.log(pages.map(p => p.tabName)) // ['Facturas', 'Clientes', 'Productos', ...]
+   *
+   * // Find page by name
+   * const facturasPage = pages.find(p => p.tabName === 'Facturas')
+   * if (facturasPage) {
+   *   const dataServices = await sdk.dataService.getByTabModuleId(facturasPage.tabId, token)
+   * }
+   * ```
+   */
+  async getPages(token) {
+    try {
+      const response = await this.client.get(
+        `${this.apiUrl}/Pages`,
+        {
+          headers: {
+            "bz-auth-token": `Basic ${token}`
+          }
+        }
+      );
+      return response || [];
+    } catch (error2) {
+      console.error("Error fetching pages:", error2);
+      return [];
+    }
+  }
+  /**
+   * Find a page by name (searches recursively in children)
+   *
+   * @example
+   * ```typescript
+   * const page = await sdk.dataService.findPageByName('Facturas', token)
+   *
+   * if (page) {
+   *   console.log(`Page ID: ${page.tabId}`)
+   *   // Can now get DataServices for this page
+   *   const dataServices = await sdk.dataService.getByTabModuleId(page.tabId, token)
+   * }
+   * ```
+   */
+  async findPageByName(pageName, token) {
+    const pages = await this.getPages(token);
+    const searchInPages = (pageList) => {
+      for (const page of pageList) {
+        if (page.tabName === pageName) {
+          return page;
+        }
+        if (page.children && Array.isArray(page.children) && page.children.length > 0) {
+          const found = searchInPages(page.children);
+          if (found) {
+            return found;
+          }
+        }
+      }
+      return null;
+    };
+    return searchInPages(pages);
+  }
+  /**
+   * Execute DataService by page name + DataService name
+   * BEST DEVELOPER EXPERIENCE - No numeric IDs needed at all!
+   *
+   * SECURITY BENEFIT: getPages() only returns pages the user has access to,
+   * providing an automatic security layer. If the user doesn't have access
+   * to the page, this method returns PAGE_NOT_FOUND error.
+   *
+   * @example
+   * ```typescript
+   * // Developer only needs two descriptive names:
+   * // 1. Page name (e.g., 'Facturas')
+   * // 2. DataService name (e.g., 'Motivos de Rechazo')
+   *
+   * const result = await sdk.dataService.executeByPageAndName<RejectionType>({
+   *   pageName: 'Facturas',
+   *   dataServiceName: 'Motivos de Rechazo',
+   *   parameters: [
+   *     { name: 'status', value: 'active' }
+   *   ]
+   * }, token)
+   *
+   * if (result.success) {
+   *   console.log(result.data) // RejectionType[]
+   * } else if (result.errorType === 'PAGE_NOT_FOUND') {
+   *   console.log('User does not have access to this page')
+   * }
+   * ```
+   */
+  async executeByPageAndName(request, token) {
+    const { pageName, dataServiceName, parameters = [], withoutCache = false, executeFromGlobal = false } = request;
+    try {
+      const page = await this.findPageByName(pageName, token);
+      if (!page) {
+        return {
+          data: [],
+          success: false,
+          errorMessage: `Page '${pageName}' not found`,
+          errorType: "PAGE_NOT_FOUND"
+        };
+      }
+      let tabModuleId = null;
+      if (page.modules && Array.isArray(page.modules)) {
+        for (const moduleRow of page.modules) {
+          if (moduleRow.modules && Array.isArray(moduleRow.modules)) {
+            for (const module of moduleRow.modules) {
+              if (module.tabModuleID) {
+                tabModuleId = module.tabModuleID;
+                break;
+              }
+            }
+            if (tabModuleId) break;
+          }
+        }
+      }
+      if (!tabModuleId) {
+        return {
+          data: [],
+          success: false,
+          errorMessage: `No modules found for page '${pageName}'`,
+          errorType: "NO_MODULES_FOUND"
+        };
+      }
+      return await this.executeByName({
+        tabModuleId,
+        dataServiceName,
+        parameters,
+        withoutCache,
+        executeFromGlobal
+      }, token);
+    } catch (error2) {
+      return {
+        data: [],
+        success: false,
+        errorMessage: error2.message,
+        errorType: error2.code
+      };
+    }
+  }
+};
+var BizuitTaskService = class {
+  constructor(config) {
+    this.client = new BizuitHttpClient(config);
+    this.apiUrl = config.apiUrl;
+  }
+  /**
+   * Get all processes available to the authenticated user
+   *
+   * @param token - Authorization token (Basic or Bearer)
+   * @returns Array of process metadata with activities
+   *
+   * @example
+   * ```typescript
+   * const sdk = new BizuitSDK({ apiUrl: 'https://api.example.com' })
+   * const processes = await sdk.tasks.getProcesses(authToken)
+   *
+   * processes.forEach(process => {
+   *   console.log(process.workflowDisplayName)
+   *   console.log('Start points:', process.activities.filter(a => a.isStartPoint))
+   *   console.log('Activities:', process.activities.filter(a => !a.isStartPoint))
+   * })
+   * ```
+   */
+  async getProcesses(token) {
+    const headers = {
+      Authorization: token
+    };
+    const result = await this.client.get(
+      `${this.apiUrl}/Processes?isMobile=false`,
+      { headers }
+    );
+    return result;
+  }
+  /**
+   * Get detailed information for a specific process
+   *
+   * @param processName - Process name (eventName)
+   * @param token - Authorization token (Basic or Bearer)
+   * @returns Single process metadata with detailed activity information
+   *
+   * @example
+   * ```typescript
+   * const sdk = new BizuitSDK({ apiUrl: 'https://api.example.com' })
+   * const processDetails = await sdk.tasks.getProcessDetails('TestWix', authToken)
+   *
+   * console.log('Process:', processDetails.workflowDisplayName)
+   * console.log('Activities:', processDetails.activities.length)
+   *
+   * const startPoint = processDetails.activities.find(a => a.isStartPoint)
+   * if (startPoint) {
+   *   console.log('Start point:', startPoint.displayName)
+   *   console.log('Form ID:', startPoint.formId)
+   * }
+   * ```
+   */
+  async getProcessDetails(processName, token) {
+    const headers = {
+      Authorization: token
+    };
+    const result = await this.client.get(
+      `${this.apiUrl}/Processes?eventName=${encodeURIComponent(processName)}&isMobile=false`,
+      { headers }
+    );
+    return result && result.length > 0 ? result[0] : null;
+  }
+  /**
+   * Search for task instances with optional pagination
+   *
+   * @param request - Search parameters including process, activity, and pagination
+   * @param token - Authorization token (Basic or Bearer)
+   * @returns Search response with events, instances, and total count
+   *
+   * @example
+   * ```typescript
+   * const sdk = new BizuitSDK({ apiUrl: 'https://api.example.com' })
+   *
+   * // Basic search
+   * const result = await sdk.tasks.searchTasks({
+   *   ProcessName: 'TestWix',
+   *   ActivityName: 'userInteractionActivity1'
+   * }, authToken)
+   *
+   * console.log('Total instances:', result.instancesTotalCount[0]?.count)
+   * console.log('Instances:', result.instances.length)
+   *
+   * // Search with pagination
+   * const pagedResult = await sdk.tasks.searchTasks({
+   *   ProcessName: 'TestWix',
+   *   ActivityName: 'userInteractionActivity1',
+   *   pageNumber: 1,
+   *   pageSize: 20,
+   *   DateFrom: '2025-01-01',
+   *   DateTo: '2025-12-31',
+   *   LockedState: -1  // -1 = all, 0 = unlocked, 1 = locked
+   * }, authToken)
+   *
+   * // Access instance details
+   * pagedResult.instances.forEach(instance => {
+   *   console.log('Instance ID:', instance.instanceId)
+   *   console.log('Status:', instance.locked ? 'Locked' : 'Available')
+   *   console.log('Locked by:', instance.lockedBy)
+   *
+   *   // Access dynamic columns with user-friendly names (automatically flattened by SDK)
+   *   console.log('Cliente:', instance['CLIENTE'])
+   *   console.log('Descripción:', instance['Descripción'])
+   *   console.log('Versión:', instance['Versión'])
+   *   console.log('Usuario:', instance['Último ejecutado por'])
+   *   console.log('Fecha:', instance['Fecha Ejecución'])
+   *   console.log('Tiempo:', instance['Tiempo Transcurrido'])
+   * })
+   * ```
+   */
+  async searchTasks(request, token) {
+    const headers = {
+      Authorization: token
+    };
+    if (request.pageNumber !== void 0) {
+      headers["bz-page"] = String(request.pageNumber);
+    }
+    if (request.pageSize !== void 0) {
+      headers["bz-page-size"] = String(request.pageSize);
+    }
+    const { pageNumber, pageSize, ...bodyParams } = request;
+    const requestBody = {
+      DateFrom: "1900-01-01",
+      DateTo: "2100-01-01",
+      LockedState: -1,
+      SerializedFilters: "",
+      IncludeWarnings: true,
+      ChildProcessName: "",
+      IsMobile: false,
+      Parameters: [],
+      ...bodyParams
+    };
+    const result = await this.client.post(
+      `${this.apiUrl}/Instances/Search`,
+      requestBody,
+      { headers }
+    );
+    return this.transformSearchResponse(result);
+  }
+  /**
+   * Transform search response to flatten column definition values
+   * Converts columnDefinitionValues array into direct properties on the instance
+   * using headerText as property names for user-friendly access
+   * and removes the original array for a completely flat structure
+   *
+   * @private
+   */
+  transformSearchResponse(response) {
+    const columnHeaderMap = /* @__PURE__ */ new Map();
+    response.events.forEach((event) => {
+      event.activities.forEach((activity) => {
+        activity.columnsDefinitions.forEach((colDef) => {
+          columnHeaderMap.set(colDef.name, colDef.headerText);
+        });
+      });
+    });
+    return {
+      ...response,
+      instances: response.instances.map((instance) => {
+        const flatInstance = { ...instance };
+        instance.columnDefinitionValues.forEach((col) => {
+          const headerText = columnHeaderMap.get(col.columnName) || col.columnName;
+          flatInstance[headerText] = col.value;
+        });
+        delete flatInstance.columnDefinitionValues;
+        delete flatInstance.eventName;
+        delete flatInstance.activityName;
+        delete flatInstance.instanceDescription;
+        return flatInstance;
+      })
+    };
+  }
+  /**
+   * Get task count for a specific process and activity
+   *
+   * @param processName - Process name
+   * @param activityName - Activity name
+   * @param token - Authorization token
+   * @returns Total count of instances
+   *
+   * @example
+   * ```typescript
+   * const count = await sdk.tasks.getTaskCount('TestWix', 'userInteractionActivity1', token)
+   * console.log(`Total tasks: ${count}`)
+   * ```
+   */
+  async getTaskCount(processName, activityName, token) {
+    const result = await this.searchTasks(
+      {
+        ProcessName: processName,
+        ActivityName: activityName,
+        pageSize: 1
+        // Minimal page size to get count only
+      },
+      token
+    );
+    const countData = result.instancesTotalCount.find(
+      (item) => item.eventName === processName
+    );
+    return countData ? countData.count : 0;
+  }
+  /**
+   * Get all start points across all processes
+   *
+   * @param token - Authorization token
+   * @returns Array of activities that are start points
+   *
+   * @example
+   * ```typescript
+   * const startPoints = await sdk.tasks.getStartPoints(token)
+   *
+   * startPoints.forEach(sp => {
+   *   console.log('Process:', sp.processName)
+   *   console.log('Start point:', sp.displayName)
+   *   console.log('Form ID:', sp.formId)
+   * })
+   * ```
+   */
+  async getStartPoints(token) {
+    const processes = await this.getProcesses(token);
+    const startPoints = processes.flatMap(
+      (process2) => process2.activities.filter((activity) => activity.isStartPoint).map((activity) => ({
+        processName: process2.name,
+        processDisplayName: process2.workflowDisplayName,
+        ...activity
+      }))
+    );
+    return startPoints;
+  }
+  /**
+   * Get all activities (non-start points) across all processes
+   *
+   * @param token - Authorization token
+   * @returns Array of activities that are not start points
+   *
+   * @example
+   * ```typescript
+   * const activities = await sdk.tasks.getActivities(token)
+   *
+   * activities.forEach(activity => {
+   *   console.log('Process:', activity.processName)
+   *   console.log('Activity:', activity.displayName)
+   * })
+   * ```
+   */
+  async getActivities(token) {
+    const processes = await this.getProcesses(token);
+    const activities = processes.flatMap(
+      (process2) => process2.activities.filter((activity) => !activity.isStartPoint).map((activity) => ({
+        processName: process2.name,
+        processDisplayName: process2.workflowDisplayName,
+        ...activity
+      }))
+    );
+    return activities;
+  }
+};
 var BizuitSDK = class {
   constructor(config) {
     this.config = config;
@@ -9176,6 +16692,8 @@ var BizuitSDK = class {
     this.process = new BizuitProcessService(config);
     this.instanceLock = new BizuitInstanceLockService(config);
     this.forms = new BizuitFormService(this);
+    this.dataService = new BizuitDataServiceService(config);
+    this.tasks = new BizuitTaskService(config);
   }
   /**
    * Get current configuration
@@ -9192,9 +16710,11 @@ var BizuitSDK = class {
     this.process = new BizuitProcessService(this.config);
     this.instanceLock = new BizuitInstanceLockService(this.config);
     this.forms = new BizuitFormService(this);
+    this.dataService = new BizuitDataServiceService(this.config);
+    this.tasks = new BizuitTaskService(this.config);
   }
 };
-var BizuitSDKContext = (0, import_react6.createContext)(null);
+var BizuitSDKContext = (0, import_react7.createContext)(null);
 
 // src/index.tsx
 var SDK_CONFIG = {
@@ -9206,15 +16726,15 @@ var SDK_CONFIG = {
 };
 function FormTemplate({ dashboardParams }) {
   const apiUrl = dashboardParams?.apiUrl || dashboardParams?.devApiUrl || SDK_CONFIG.defaultApiUrl;
-  const sdk = (0, import_react8.useMemo)(() => new BizuitSDK({ apiUrl }), [apiUrl]);
-  const [loading, setLoading] = (0, import_react8.useState)(true);
-  const [data, setData] = (0, import_react8.useState)([]);
-  const [selectedCategory, setSelectedCategory] = (0, import_react8.useState)("");
-  const [showInfoModal, setShowInfoModal] = (0, import_react8.useState)(false);
-  const [showSubmitModal, setShowSubmitModal] = (0, import_react8.useState)(false);
+  const sdk = (0, import_react10.useMemo)(() => new BizuitSDK({ apiUrl }), [apiUrl]);
+  const [loading, setLoading] = (0, import_react10.useState)(true);
+  const [data, setData] = (0, import_react10.useState)([]);
+  const [selectedCategory, setSelectedCategory] = (0, import_react10.useState)("");
+  const [showInfoModal, setShowInfoModal] = (0, import_react10.useState)(false);
+  const [showSubmitModal, setShowSubmitModal] = (0, import_react10.useState)(false);
   const userName = dashboardParams?.userName || "Developer";
   const instanceId = dashboardParams?.instanceId || "dev-instance-001";
-  (0, import_react8.useEffect)(() => {
+  (0, import_react10.useEffect)(() => {
     loadData();
   }, []);
   const loadData = async () => {
@@ -9238,9 +16758,16 @@ function FormTemplate({ dashboardParams }) {
     }
   };
   if (loading) {
-    return /* @__PURE__ */ React.createElement(BizuitThemeProvider, null, /* @__PURE__ */ React.createElement("div", { className: "min-h-screen flex items-center justify-center", style: { backgroundColor: "#faf9f7" } }, /* @__PURE__ */ React.createElement("div", { className: "text-center" }, /* @__PURE__ */ React.createElement("div", { className: "w-20 h-20 border-4 border-orange-200 border-t-orange-600 rounded-full animate-spin mx-auto mb-6" }), /* @__PURE__ */ React.createElement("p", { className: "text-lg font-medium text-gray-700" }, "Loading Form Template..."), /* @__PURE__ */ React.createElement("p", { className: "text-sm text-gray-500 mt-2" }, "Version ", version))));
+    return /* @__PURE__ */ React.createElement(BizuitThemeProvider, null, /* @__PURE__ */ React.createElement("div", { className: "min-h-screen flex items-center justify-center", style: { backgroundColor: "#faf9f7" } }, /* @__PURE__ */ React.createElement("div", { className: "text-center" }, /* @__PURE__ */ React.createElement("div", { className: "w-20 h-20 border-4 border-orange-200 border-t-orange-600 rounded-full animate-spin mx-auto mb-6" }), /* @__PURE__ */ React.createElement("p", { className: "text-lg font-medium text-gray-700" }, "Loading Form Template..."), /* @__PURE__ */ React.createElement("p", { className: "text-sm text-gray-500 mt-2" }, "Version ", version2))));
   }
-  return /* @__PURE__ */ React.createElement(BizuitThemeProvider, null, /* @__PURE__ */ React.createElement("div", { className: "min-h-screen", style: { backgroundColor: "#faf9f7" } }, /* @__PURE__ */ React.createElement("div", { className: "bg-white shadow-sm border-b border-gray-200" }, /* @__PURE__ */ React.createElement("div", { className: "max-w-7xl mx-auto px-8 py-6" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-3 mb-2" }, /* @__PURE__ */ React.createElement("div", { className: "w-12 h-12 bg-gradient-to-br from-orange-500 to-orange-600 rounded-xl flex items-center justify-center shadow-lg" }, /* @__PURE__ */ React.createElement("svg", { className: "w-7 h-7 text-white", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" }, /* @__PURE__ */ React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" }))), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { className: "text-3xl font-bold text-gray-900" }, "Form Template"), /* @__PURE__ */ React.createElement("p", { className: "text-sm text-gray-600 mt-1" }, "Professional form template for BIZUIT BPM")))), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, /* @__PURE__ */ React.createElement("div", { className: "text-xs text-gray-500 mb-1" }, "Version ", /* @__PURE__ */ React.createElement("span", { className: "font-semibold text-orange-600" }, version)), /* @__PURE__ */ React.createElement("div", { className: "text-sm font-medium text-gray-700" }, "Usuario: ", /* @__PURE__ */ React.createElement("span", { className: "text-orange-600" }, userName)), /* @__PURE__ */ React.createElement("div", { className: "text-xs text-gray-500 mt-1" }, "Instance: ", instanceId))))), /* @__PURE__ */ React.createElement("div", { className: "max-w-7xl mx-auto px-8 py-8" }, /* @__PURE__ */ React.createElement("div", { className: "mb-6" }, /* @__PURE__ */ React.createElement("h2", { className: "text-3xl font-bold text-gray-900 mb-2" }, "Dashboard"), /* @__PURE__ */ React.createElement("p", { className: "text-gray-600" }, "Vista general de datos y acciones disponibles")), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6" }, /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl shadow-sm hover:shadow-md transition-shadow border-l-4 border-blue-500 p-6" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-gray-600 mb-1" }, "Total Items"), /* @__PURE__ */ React.createElement("p", { className: "text-3xl font-bold text-gray-900" }, data.length)), /* @__PURE__ */ React.createElement("div", { className: "w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center" }, /* @__PURE__ */ React.createElement("svg", { className: "w-6 h-6 text-blue-500", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" }, /* @__PURE__ */ React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" })))), /* @__PURE__ */ React.createElement("div", { className: "mt-2" }, /* @__PURE__ */ React.createElement("svg", { className: "w-4 h-4 inline text-green-500", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" }, /* @__PURE__ */ React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" })), /* @__PURE__ */ React.createElement("span", { className: "text-xs text-gray-600 ml-1" }, "Total registros"))), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl shadow-sm hover:shadow-md transition-shadow border-l-4 border-orange-500 p-6" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-gray-600 mb-1" }, "Active Items"), /* @__PURE__ */ React.createElement("p", { className: "text-3xl font-bold text-gray-900" }, data.filter((item) => item.status === "Active").length)), /* @__PURE__ */ React.createElement("div", { className: "w-12 h-12 bg-orange-50 rounded-xl flex items-center justify-center" }, /* @__PURE__ */ React.createElement("svg", { className: "w-6 h-6 text-orange-500", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" }, /* @__PURE__ */ React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" })))), /* @__PURE__ */ React.createElement("div", { className: "mt-2" }, /* @__PURE__ */ React.createElement("svg", { className: "w-4 h-4 inline text-orange-500", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" }, /* @__PURE__ */ React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" })), /* @__PURE__ */ React.createElement("span", { className: "text-xs text-gray-600 ml-1" }, "Estado activo"))), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl shadow-sm hover:shadow-md transition-shadow border-l-4 border-green-500 p-6" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-gray-600 mb-1" }, "Total Amount"), /* @__PURE__ */ React.createElement("p", { className: "text-3xl font-bold text-gray-900" }, "$ ", (data.reduce((sum, item) => sum + item.amount, 0) / 1e3).toFixed(1), "K")), /* @__PURE__ */ React.createElement("div", { className: "w-12 h-12 bg-green-50 rounded-xl flex items-center justify-center" }, /* @__PURE__ */ React.createElement("svg", { className: "w-6 h-6 text-green-500", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" }, /* @__PURE__ */ React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" })))), /* @__PURE__ */ React.createElement("div", { className: "mt-2" }, /* @__PURE__ */ React.createElement("span", { className: "text-xs text-gray-600" }, data.length, " items procesados"))), /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ React.createElement(BizuitThemeProvider, null, /* @__PURE__ */ React.createElement("div", { className: "min-h-screen", style: { backgroundColor: "#faf9f7" } }, /* @__PURE__ */ React.createElement("div", { className: "bg-white shadow-sm border-b border-gray-200" }, /* @__PURE__ */ React.createElement("div", { className: "max-w-7xl mx-auto px-8 py-6" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { className: "flex items-center gap-3 mb-2" }, /* @__PURE__ */ React.createElement("div", { className: "w-12 h-12 bg-gradient-to-br from-orange-500 to-orange-600 rounded-xl flex items-center justify-center shadow-lg" }, /* @__PURE__ */ React.createElement("svg", { className: "w-7 h-7 text-white", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" }, /* @__PURE__ */ React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" }))), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { className: "text-3xl font-bold text-gray-900" }, "Form Template - ", (/* @__PURE__ */ new Date()).toLocaleString("es-AR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  })), /* @__PURE__ */ React.createElement("p", { className: "text-sm text-gray-600 mt-1" }, "Professional form template for BIZUIT BPM")))), /* @__PURE__ */ React.createElement("div", { className: "text-right" }, /* @__PURE__ */ React.createElement("div", { className: "text-xs text-gray-500 mb-1" }, "Version ", /* @__PURE__ */ React.createElement("span", { className: "font-semibold text-orange-600" }, version2)), /* @__PURE__ */ React.createElement("div", { className: "text-sm font-medium text-gray-700" }, "Usuario: ", /* @__PURE__ */ React.createElement("span", { className: "text-orange-600" }, userName)), /* @__PURE__ */ React.createElement("div", { className: "text-xs text-gray-500 mt-1" }, "Instance: ", instanceId))))), /* @__PURE__ */ React.createElement("div", { className: "max-w-7xl mx-auto px-8 py-8" }, /* @__PURE__ */ React.createElement("div", { className: "mb-6" }, /* @__PURE__ */ React.createElement("h2", { className: "text-3xl font-bold text-gray-900 mb-2" }, "Dashboard"), /* @__PURE__ */ React.createElement("p", { className: "text-gray-600" }, "Vista general de datos y acciones disponibles")), /* @__PURE__ */ React.createElement("div", { className: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6" }, /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl shadow-sm hover:shadow-md transition-shadow border-l-4 border-blue-500 p-6" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-gray-600 mb-1" }, "Total Items"), /* @__PURE__ */ React.createElement("p", { className: "text-3xl font-bold text-gray-900" }, data.length)), /* @__PURE__ */ React.createElement("div", { className: "w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center" }, /* @__PURE__ */ React.createElement("svg", { className: "w-6 h-6 text-blue-500", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" }, /* @__PURE__ */ React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" })))), /* @__PURE__ */ React.createElement("div", { className: "mt-2" }, /* @__PURE__ */ React.createElement("svg", { className: "w-4 h-4 inline text-green-500", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" }, /* @__PURE__ */ React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" })), /* @__PURE__ */ React.createElement("span", { className: "text-xs text-gray-600 ml-1" }, "Total registros"))), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl shadow-sm hover:shadow-md transition-shadow border-l-4 border-orange-500 p-6" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-gray-600 mb-1" }, "Active Items"), /* @__PURE__ */ React.createElement("p", { className: "text-3xl font-bold text-gray-900" }, data.filter((item) => item.status === "Active").length)), /* @__PURE__ */ React.createElement("div", { className: "w-12 h-12 bg-orange-50 rounded-xl flex items-center justify-center" }, /* @__PURE__ */ React.createElement("svg", { className: "w-6 h-6 text-orange-500", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" }, /* @__PURE__ */ React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" })))), /* @__PURE__ */ React.createElement("div", { className: "mt-2" }, /* @__PURE__ */ React.createElement("svg", { className: "w-4 h-4 inline text-orange-500", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" }, /* @__PURE__ */ React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" })), /* @__PURE__ */ React.createElement("span", { className: "text-xs text-gray-600 ml-1" }, "Estado activo"))), /* @__PURE__ */ React.createElement("div", { className: "bg-white rounded-xl shadow-sm hover:shadow-md transition-shadow border-l-4 border-green-500 p-6" }, /* @__PURE__ */ React.createElement("div", { className: "flex items-center justify-between" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-gray-600 mb-1" }, "Total Amount"), /* @__PURE__ */ React.createElement("p", { className: "text-3xl font-bold text-gray-900" }, "$ ", (data.reduce((sum, item) => sum + item.amount, 0) / 1e3).toFixed(1), "K")), /* @__PURE__ */ React.createElement("div", { className: "w-12 h-12 bg-green-50 rounded-xl flex items-center justify-center" }, /* @__PURE__ */ React.createElement("svg", { className: "w-6 h-6 text-green-500", fill: "none", stroke: "currentColor", viewBox: "0 0 24 24" }, /* @__PURE__ */ React.createElement("path", { strokeLinecap: "round", strokeLinejoin: "round", strokeWidth: 2, d: "M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" })))), /* @__PURE__ */ React.createElement("div", { className: "mt-2" }, /* @__PURE__ */ React.createElement("span", { className: "text-xs text-gray-600" }, data.length, " items procesados"))), /* @__PURE__ */ React.createElement(
     "div",
     {
       className: "bg-white rounded-xl shadow-sm hover:shadow-md transition-shadow border-l-4 border-emerald-500 p-6 cursor-pointer",
@@ -9336,7 +16863,7 @@ function FormTemplate({ dashboardParams }) {
       className: "flex-1 border-gray-300 hover:bg-gray-50"
     },
     "Cancel"
-  ))))), /* @__PURE__ */ React.createElement("div", { className: "max-w-7xl mx-auto px-8 py-8" }, /* @__PURE__ */ React.createElement("div", { className: "text-center" }, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-gray-500" }, "BIZUIT Custom Form Template ", /* @__PURE__ */ React.createElement("span", { className: "font-semibold text-orange-600" }, "v", version)), /* @__PURE__ */ React.createElement("p", { className: "text-xs text-gray-400 mt-1" }, "Powered by ", /* @__PURE__ */ React.createElement("strong", { className: "text-gray-600" }, "@tyconsa/bizuit-form-sdk"), " and ", /* @__PURE__ */ React.createElement("strong", { className: "text-gray-600" }, "@tyconsa/bizuit-ui-components"))))));
+  ))))), /* @__PURE__ */ React.createElement("div", { className: "max-w-7xl mx-auto px-8 py-8" }, /* @__PURE__ */ React.createElement("div", { className: "text-center" }, /* @__PURE__ */ React.createElement("p", { className: "text-sm text-gray-500" }, "BIZUIT Custom Form Template ", /* @__PURE__ */ React.createElement("span", { className: "font-semibold text-orange-600" }, "v", version2)), /* @__PURE__ */ React.createElement("p", { className: "text-xs text-gray-400 mt-1" }, "Powered by ", /* @__PURE__ */ React.createElement("strong", { className: "text-gray-600" }, "@tyconsa/bizuit-form-sdk"), " and ", /* @__PURE__ */ React.createElement("strong", { className: "text-gray-600" }, "@tyconsa/bizuit-ui-components"))))));
 }
 export {
   FormTemplate as default

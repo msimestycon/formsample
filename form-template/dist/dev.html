@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Form Template - Dev Mode</title>
+  <!-- Enable DEV_MODE for conditional logging (devLog/devWarn only log when this is true) -->
+  <script>window.DEV_MODE = true;</script>
 
   <!-- Google Fonts - Quicksand -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -72,46 +74,51 @@
 <body>
   <div id="root"></div>
 
-  <!-- Load dev credentials (optional - can be edited) -->
+  <!-- Load dev credentials (gitignored file) -->
   <script type="module" src="./dev-credentials.js"></script>
 
-  <!-- Load the fat bundle -->
+  <!-- Load the built form as ES module -->
   <script type="module">
     // Force light theme and orange color
     localStorage.setItem('bizuit-ui-theme', 'light');
     localStorage.setItem('bizuit-ui-color-theme', 'orange');
 
-    // Import dev credentials (optional)
+    // Import dev credentials (from dev-credentials.js)
     import { DEV_CREDENTIALS } from './dev-credentials.js';
 
-    // Dynamic import with cache buster
+    // Dynamic import with cache buster to always load latest version
     const cacheBuster = Date.now();
-    const formModule = await import('./form.dev.js?v=' + cacheBuster);
+    console.log('🔄 Loading form.dev.js with cache buster:', cacheBuster);
+    const formModule = await import('./dist/form.dev.js?v=' + cacheBuster);
     const FormTemplate = formModule.default;
+    console.log('✅ Form module loaded successfully at:', new Date().toLocaleTimeString());
 
-    // Mount form
+    // Mount the form with mock dashboard params
     const container = document.getElementById('root');
     const root = ReactDOM.createRoot(container);
 
-    // Mock dashboard params
+    // Mock dashboard parameters for testing
+    // In dev mode: pass devUsername/devPassword/devApiUrl/devPluginApiUrl + roles/roleSettings
+    // In production: Dashboard/FormLoader provides token, apiUrl, pluginApiUrl, roles, roleSettings
     const mockDashboardParams = {
-      userName: 'Developer',
+      userName: DEV_CREDENTIALS.username,
       instanceId: 'dev-instance-001',
       eventName: 'TestProcess',
       activityName: 'Start',
-      // Dev credentials (optional - update dev-credentials.js to use real API)
+      // Dev credentials (NOT committed to repo)
       devUsername: DEV_CREDENTIALS.username,
       devPassword: DEV_CREDENTIALS.password,
-      devApiUrl: DEV_CREDENTIALS.apiUrl
+      devApiUrl: DEV_CREDENTIALS.apiUrl,
+      devPluginApiUrl: DEV_CREDENTIALS.pluginApiUrl,
+      // Emulate what runtime-app sends (roles and roleSettings from Dashboard)
+      roles: DEV_CREDENTIALS.roles,
+      roleSettings: DEV_CREDENTIALS.roleSettings
     };
 
-    // Render
+    // Render the form
     root.render(React.createElement(FormTemplate, {
       dashboardParams: mockDashboardParams
     }));
-
-    console.log('✅ Form Template loaded in development mode');
-    console.log('📦 Dashboard Params:', mockDashboardParams);
   </script>
 </body>
 </html>
